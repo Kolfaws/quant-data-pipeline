@@ -10,9 +10,13 @@
 # =====================================
 # 2. 数据文件
 # =====================================
-data/
-!data/raw/.gitkeep
-!data/processed/.gitkeep
+# 忽略 data 下的所有文件
+data/**
+# 保留文件夹本身，以及内部的 .gitkeep
+!data/
+!data/raw/
+!data/processed/
+!data/**/.gitkeep
 *.parquet
 *.csv
 *.xlsx
