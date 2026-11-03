@@ -17,19 +17,37 @@ import argparse
 import logging
 import re
 import sys
+from pathlib import Path
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Final
-from typing import Any
+from typing import Final, Any
 
 import duckdb
 
 LOG = logging.getLogger("init_duckdb")
-
 SCHEMA_VERSION: Final[str] = "1.1.0"
-DEFAULT_DB_PATH: Final[Path] = Path("data/market.duckdb")
+
+
+def _load_config_defaults() -> tuple[Path, str]:
+    """在函数内部处理路径和导入"""
+    try:
+        # 将项目根目录加入 sys.path (只在运行函数时生效)
+        root_dir = Path(__file__).resolve().parent.parent
+        if str(root_dir) not in sys.path:
+            sys.path.insert(0, str(root_dir))
+
+        # 在函数内导入
+        from src.data_pipeline.config import DUCKDB_PATH, LOG_LEVEL
+
+        db_path = Path(DUCKDB_PATH) if DUCKDB_PATH else Path("data/market.duckdb")
+        return db_path, LOG_LEVEL
+    except (ImportError, ModuleNotFoundError):
+        # 如果包没装好或者找不到，安全回退到默认值
+        return Path("data/market.duckdb"), "INFO"
+
+
+DEFAULT_DB_PATH, DEFAULT_LOG_LEVEL = _load_config_defaults()
 DEFAULT_THREADS: Final[int] = 4
 DEFAULT_MEMORY_LIMIT: Final[str] = "4GB"
 
@@ -430,7 +448,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--temp-dir", dest="temp_dir", type=Path, default=None)
     parser.add_argument(
-        "--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR")
+        "--log-level",
+        default=DEFAULT_LOG_LEVEL,  # <--- 使用从 config 读取的默认值
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
     )
     return parser
 
