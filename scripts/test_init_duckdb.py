@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""init_duckdb.py 的 pytest 用例。运行：pytest -q test_init_duckdb.py"""
+"""init_duckdb.py 的 pytest 用例  运行：pytest -q test_init_duckdb.py"""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ _SIZE_MULT: Final[dict[str, int]] = {
 
 
 def _size_to_bytes(text: str) -> float:
-    """把 '4GB' / '976.6 MiB' 解析成字节数。只用于比较量级，不苛求单位口径一致。"""
+    """把 '4GB' / '976.6 MiB' 解析成字节数  只用于比较量级，不苛求单位口径一致"""
     match = _SIZE_RE.match(text.strip())
     if match is None:
         raise AssertionError(f"无法解析容量字符串：{text!r}")
@@ -93,7 +93,7 @@ def test_init_is_idempotent(tmp_path: Path) -> None:
 
 
 def test_init_does_not_duplicate_version_rows(tmp_path: Path) -> None:
-    """ON CONFLICT 若被删掉，三连 init 会产生 3 行，用 row_count 钉死。"""
+    """ON CONFLICT 若被删掉，三连 init 会产生 3 行，用 row_count 钉死"""
     db = tmp_path / "m.duckdb"
     for _ in range(3):
         with mod.database(db) as con:
@@ -140,7 +140,7 @@ def test_memory_limit_accepts_valid(value: str) -> None:
 
 
 def test_memory_limit_takes_effect() -> None:
-    """不只是「不报错」，要证明配置真的落到 buffer manager 上。"""
+    """不只是「不报错」，要证明配置真的落到 buffer manager 上"""
     with mod.database(":memory:", memory_limit="256MB") as con:
         small = _size_to_bytes(
             str(mod._scalar(con, "SELECT current_setting('memory_limit')"))
@@ -192,7 +192,7 @@ def test_file_permissions(tmp_path: Path) -> None:
 
 @POSIX_ONLY
 def test_permissions_restored_on_reconnect(tmp_path: Path) -> None:
-    """库文件被外部改松后，重连必须重新收紧到 0600。"""
+    """库文件被外部改松后，重连必须重新收紧到 0600"""
     db = tmp_path / "m.duckdb"
     with mod.database(db) as con:
         mod.init_schema(con)
@@ -247,7 +247,7 @@ def test_multiple_readers_coexist(tmp_path: Path) -> None:
 
 
 def test_second_writer_is_rejected(tmp_path: Path) -> None:
-    """单写者契约：第二个 RW 连接必须失败，且失败路径不得泄漏句柄。"""
+    """单写者契约：第二个 RW 连接必须失败，且失败路径不得泄漏句柄"""
     db = tmp_path / "m.duckdb"
     with mod.database(db) as con:
         mod.init_schema(con)
@@ -337,7 +337,7 @@ def test_table_row_counts_ignores_views(tmp_path: Path) -> None:
 
 
 def test_pylance_optional_subscript_regression(tmp_path: Path) -> None:
-    """结果类型必须是 dict[str, int]，不得混入 None / bool。"""
+    """结果类型必须是 dict[str, int]，不得混入 None / bool"""
     with mod.database(tmp_path / "m.duckdb") as con:
         mod.init_schema(con)
         counts = mod.table_row_counts(con)
@@ -358,7 +358,7 @@ def test_installed_version_none_when_row_absent(tmp_path: Path) -> None:
 
 
 def test_installed_version_before_init_raises(tmp_path: Path) -> None:
-    """未 init 时 meta_schema_version 不存在 → fail-fast 上抛，不返回 None。"""
+    """未 init 时 meta_schema_version 不存在 → fail-fast 上抛，不返回 None"""
     with mod.database(tmp_path / "m.duckdb") as con:
         with pytest.raises(duckdb.Error):
             mod.installed_version(con)

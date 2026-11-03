@@ -3,7 +3,7 @@
 """
 init_duckdb.py — DuckDB 量化库结构初始化
 
-Rules: 只建表、建视图、校验结构；不连接 Tushare，不写入行情数据
+Rules: 只建表、建视图、校验结构
 Constraints: import 本模块 -> connect()/database() 拿连接 -> init_schema(con) 一次
 
 用法：
