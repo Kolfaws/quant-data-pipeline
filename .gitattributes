@@ -1,0 +1,17 @@
+# 统一使用 LF
+* text=auto eol=lf
+
+# 明确指定必须使用 LF
+*.py text eol=lf
+*.sh text eol=lf
+*.md text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.toml text eol=lf
+
+# 明确指定二进制文件，防止合并冲突
+*.parquet binary
+*.csv binary
+*.png binary
+*.jpg binary
+*.db binary
