@@ -48,11 +48,11 @@ def _load_config_defaults() -> tuple[Path, str]:
 
 
 DEFAULT_DB_PATH, DEFAULT_LOG_LEVEL = _load_config_defaults()
-DEFAULT_THREADS: Final[int] = 4
-DEFAULT_MEMORY_LIMIT: Final[str] = "4GB"
+DEFAULT_THREADS: Final[int] = 6
+DEFAULT_MEMORY_LIMIT: Final[str] = "6GB"
 
 _MEMORY_LIMIT_RE: Final[re.Pattern[str]] = re.compile(
-    r"^\d+(?:\.\d+)?\s?(?:MB|GB|TB)$", re.I
+    r"^\d+(?:\.\d+)?(?:MB|GB|TB)$", re.I
 )
 _TYPE_ALIASES: Final[dict[str, str]] = {"TIMESTAMPTZ": "TIMESTAMP WITH TIME ZONE"}
 
@@ -393,20 +393,28 @@ def verify_schema(con: duckdb.DuckDBPyConnection) -> None:
 
 
 def init_schema(con: duckdb.DuckDBPyConnection, *, verify: bool = True) -> None:
-    """幂等建表 + 建视图 + 记录版本号 DDL 与校验同事务，失败整体回滚"""
-    with con:
+    """幂等建表 + 建视图 + 记录版本号；DDL 与校验同事务，失败整体回滚。"""
+    con.execute("BEGIN TRANSACTION")
+    try:
         for table in TABLES:
             con.execute(table.ddl())
+
+        if verify:
+            verify_schema(con)  # 提前校验，残缺表在这里抛 SchemaError
+
         for name, sql in VIEWS.items():
             con.execute(f'CREATE OR REPLACE VIEW "{name}" AS {sql}')
+
         con.execute(
             "INSERT INTO meta_schema_version (component, version) VALUES ('warehouse', ?) "
             "ON CONFLICT (component) DO UPDATE SET "
-            "version = excluded.version, applied_at = current_timestamp",
+            "version = excluded.version, applied_at = now()",
             [SCHEMA_VERSION],
         )
-        if verify:
-            verify_schema(con)
+        con.execute("COMMIT")
+    except Exception:
+        con.execute("ROLLBACK")
+        raise
 
 
 def installed_version(con: duckdb.DuckDBPyConnection) -> str | None:

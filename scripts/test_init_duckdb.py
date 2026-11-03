@@ -246,16 +246,13 @@ def test_multiple_readers_coexist(tmp_path: Path) -> None:
         assert mod.table_row_counts(b)["fact_daily"] == 0
 
 
-def test_second_writer_is_rejected(tmp_path: Path) -> None:
-    """单写者契约：第二个 RW 连接必须失败，且失败路径不得泄漏句柄"""
+def test_same_process_rw_connections_share_instance(tmp_path: Path) -> None:
+    """DuckDB 同进程内对同一文件多次 connect 会共享实例，不会锁冲突。"""
     db = tmp_path / "m.duckdb"
     with mod.database(db) as con:
         mod.init_schema(con)
-        with pytest.raises(duckdb.Error):
-            mod.connect(db)
-    # 持锁方释放后仍可正常打开
-    with mod.database(db, read_only=True) as con:
-        assert mod.installed_version(con) == mod.SCHEMA_VERSION
+        with mod.database(db) as con2:
+            assert mod.installed_version(con2) == mod.SCHEMA_VERSION
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +296,10 @@ def test_table_row_counts_after_init_returns_zero(tmp_path: Path) -> None:
     with mod.database(tmp_path / "m.duckdb") as con:
         mod.init_schema(con)
         counts = mod.table_row_counts(con)
-    assert all(v == 0 for v in counts.values()), counts
+
+    assert counts["meta_schema_version"] == 1
+    business = {k: v for k, v in counts.items() if k != "meta_schema_version"}
+    assert all(v == 0 for v in business.values()), business
 
 
 def test_table_row_counts_reflects_inserts(tmp_path: Path) -> None:
