@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""init_duckdb.py 的 pytest 用例  运行：pytest -q test_init_duckdb.py"""
+"""init_market_db.py 的 pytest 用例  运行：pytest -q test_init_market_db.py"""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from typing import Final
 import duckdb
 import pytest
 
-import init_duckdb as mod
+import init_market_db as mod
 
 POSIX_ONLY = pytest.mark.skipif(os.name != "posix", reason="POSIX 文件权限语义")
 

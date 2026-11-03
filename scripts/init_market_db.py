@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-init_duckdb.py — DuckDB 量化库结构初始化
+init_market_db.py — DuckDB 量化库结构初始化
 
 Rules: 只建表、建视图、校验结构
 Constraints: import 本模块 -> connect()/database() 拿连接 -> init_schema(con) 一次
 
 用法：
-    python init_duckdb.py init  --db data/market.duckdb
-    python init_duckdb.py check --db data/market.duckdb
+    python init_market_db.py init  --db data/market.duckdb
+    python init_market_db.py check --db data/market.duckdb
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from typing import Final, Any
 
 import duckdb
 
-LOG = logging.getLogger("init_duckdb")
+LOG = logging.getLogger("init_market_db")
 SCHEMA_VERSION: Final[str] = "1.1.0"
 
 
@@ -446,7 +446,7 @@ def table_row_counts(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="init_duckdb.py", description="DuckDB 量化库结构初始化"
+        prog="init_market_db.py", description="DuckDB 量化库结构初始化"
     )
     parser.add_argument("command", nargs="?", default="init", choices=("init", "check"))
     parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
