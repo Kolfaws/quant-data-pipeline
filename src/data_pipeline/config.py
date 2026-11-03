@@ -5,4 +5,4 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TUSHARE_TOKEN = os.getenv("TUSHARE_TOKEN")
-CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "localhost")
+DUCKDB_PATH = os.getenv("DUCKDB_PATH")
