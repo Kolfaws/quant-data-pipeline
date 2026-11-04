@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-init_market_db.py — DuckDB 量化库结构初始化
+init_market_db.py — DuckDB 量化库结构初始化（warehouse 组件）
 
 Rules: 只建表、建视图、校验结构
 Constraints: import 本模块 -> connect()/database() 拿连接 -> init_schema(con) 一次
@@ -9,6 +9,10 @@ Constraints: import 本模块 -> connect()/database() 拿连接 -> init_schema(c
 用法：
     python init_market_db.py init  --db data/market.duckdb
     python init_market_db.py check --db data/market.duckdb
+
+与 factor 组件的关系：
+    meta_schema_version 是组件无关的共享表，warehouse 与 factor 各占一行。
+    installed_version(con, component) 默认查 'warehouse'，向后兼容。
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ import duckdb
 
 LOG = logging.getLogger("init_market_db")
 SCHEMA_VERSION: Final[str] = "1.1.0"
+WAREHOUSE_COMPONENT: Final[str] = "warehouse"  # [MODIFIED]
 
 
 def _load_config_defaults() -> tuple[Path, str]:
@@ -54,6 +59,8 @@ DEFAULT_MEMORY_LIMIT: Final[str] = "6GB"
 _MEMORY_LIMIT_RE: Final[re.Pattern[str]] = re.compile(
     r"^\d+(?:\.\d+)?(?:MB|GB|TB)$", re.I
 )
+# [MODIFIED] 组件名白名单，防止 SQL 注入与拼写漂移
+_COMPONENT_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 _TYPE_ALIASES: Final[dict[str, str]] = {"TIMESTAMPTZ": "TIMESTAMP WITH TIME ZONE"}
 
 
@@ -267,6 +274,13 @@ def _validate_memory_limit(memory_limit: str) -> str:
     return memory_limit.strip()
 
 
+# [MODIFIED] 组件名校验：只允许小写字母开头 + 小写字母/数字/下划线
+def _validate_component(component: str) -> str:
+    if not isinstance(component, str) or not _COMPONENT_RE.fullmatch(component):
+        raise ConfigError(f"component 非法：{component!r}，示例 'warehouse'")
+    return component
+
+
 def _chmod_quiet(path: Path, mode: int) -> None:
     try:
         path.chmod(mode)
@@ -309,6 +323,7 @@ def connect(
             )  # SECURITY: 临时目录 0700
             con.execute(f"SET temp_directory = '{_quote_literal(str(tmp.resolve()))}'")
     except Exception:
+        # LEAK: 构造失败必须关闭，否则句柄泄漏
         con.close()
         raise
 
@@ -405,11 +420,12 @@ def init_schema(con: duckdb.DuckDBPyConnection, *, verify: bool = True) -> None:
         for name, sql in VIEWS.items():
             con.execute(f'CREATE OR REPLACE VIEW "{name}" AS {sql}')
 
+        # [MODIFIED] component 改为参数绑定，保持与 factor 组件同一写法
         con.execute(
-            "INSERT INTO meta_schema_version (component, version) VALUES ('warehouse', ?) "
+            "INSERT INTO meta_schema_version (component, version) VALUES (?, ?) "
             "ON CONFLICT (component) DO UPDATE SET "
             "version = excluded.version, applied_at = now()",
-            [SCHEMA_VERSION],
+            [WAREHOUSE_COMPONENT, SCHEMA_VERSION],
         )
         con.execute("COMMIT")
     except Exception:
@@ -417,9 +433,20 @@ def init_schema(con: duckdb.DuckDBPyConnection, *, verify: bool = True) -> None:
         raise
 
 
-def installed_version(con: duckdb.DuckDBPyConnection) -> str | None:
+# [MODIFIED] 增加 component 参数；默认 'warehouse'，向后兼容既有调用方
+def installed_version(
+    con: duckdb.DuckDBPyConnection,
+    component: str = WAREHOUSE_COMPONENT,
+) -> str | None:
+    """
+    返回指定组件版本；默认 'warehouse'。
+
+    行不存在返回 None；meta_schema_version 表不存在时抛 duckdb.Error（fail-fast）。
+    """
+    component = _validate_component(component)
     row = con.execute(
-        "SELECT version FROM meta_schema_version WHERE component = 'warehouse'"
+        "SELECT version FROM meta_schema_version WHERE component = ?",
+        [component],
     ).fetchone()
     return None if row is None else str(row[0])
 
@@ -437,6 +464,7 @@ def table_row_counts(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
         if table.name not in existing:
             out[table.name] = -1
             continue
+        # SECURITY: table.name 来自模块常量，无外部输入
         out[table.name] = int(_scalar(con, f'SELECT count(*) FROM "{table.name}"'))
     return out
 
@@ -457,7 +485,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--temp-dir", dest="temp_dir", type=Path, default=None)
     parser.add_argument(
         "--log-level",
-        default=DEFAULT_LOG_LEVEL,  # <--- 使用从 config 读取的默认值
+        default=DEFAULT_LOG_LEVEL,
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
     )
     return parser
@@ -488,9 +516,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 init_schema(con)
             counts = table_row_counts(con)
             LOG.info(
-                "%s 完成  db=%s  version=%s",
+                "%s 完成  db=%s  component=%s  version=%s",
                 "校验" if args.command == "check" else "初始化",
                 args.db,
+                WAREHOUSE_COMPONENT,
                 installed_version(con) or "-",
             )
             for name, rows in counts.items():

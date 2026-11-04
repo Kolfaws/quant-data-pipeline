@@ -88,7 +88,7 @@ finally:
 | `database(...)` | 上下文管理器版本 |
 | `init_schema(con, *, verify=True)` | 建表 + 建视图 + 写版本 + 可选校验（单事务） |
 | `verify_schema(con)` | 比对实际结构与 `TABLES`，不一致抛 `SchemaError` |
-| `installed_version(con)` | 返回 `warehouse` 组件版本号，无行返回 `None`，表不存在抛 `duckdb.Error` |
+| `installed_version(con, component='warehouse')` | 返回指定组件版本；默认 `warehouse`；行不存在返回 `None`，表不存在抛 `duckdb.Error` |
 | `table_row_counts(con)` | 各表行数；表不存在记 `-1`；视图与非 `TABLES` 表不参与 |
 | `_scalar(con, sql, params=())` | 单值查询；无结果行抛 `SchemaError` |
 
@@ -141,7 +141,7 @@ finally:
 
 | 字段 | 类型 | 约束 | 说明 |
 | --- | --- | --- | --- |
-| `component` | `VARCHAR` | `NOT NULL` | 组件名，当前固定 `'warehouse'` |
+| `component` | `VARCHAR` | `NOT NULL` | 组件名；warehouse 固定 `'warehouse'`，factor 组件为 `'factor'` |
 | `version` | `VARCHAR` | `NOT NULL` | schema 版本号，当前 `1.1.0` |
 | `applied_at` | `TIMESTAMPTZ` | `NOT NULL DEFAULT current_timestamp` | 版本生效时间 |
 
@@ -371,9 +371,10 @@ except Exception:
 ## 3.4 版本记录
 
 - 表 `meta_schema_version(component, version, applied_at)`，主键 `component`。
-- `init_schema` 只 upsert `component = 'warehouse'` 一行。
-- `installed_version(con)` 返回该行 `version`；行不存在返回 `None`；表不存在直接抛 `duckdb.Error`（fail-fast，不静默）。
-- 未来拆多个组件时，每个组件独立 upsert，互不影响。
+- `init_schema` 只 upsert `component = 'warehouse'` 一行；factor 组件会写入 `component = 'factor'` 行，与 warehouse 行并存，互不覆盖。
+- `installed_version(con, component='warehouse')` 返回指定组件的 `version`；行不存在返回 `None`；表不存在直接抛 `duckdb.Error`（fail-fast，不静默）。
+- 组件名走 `_validate_component()` 白名单校验，并以参数绑定传入 SQL。
+- market 的 `verify_schema` / `table_row_counts` 仍只覆盖 warehouse 的 `TABLES`；factor 表作为额外对象被忽略，不会导致 market 校验失败。
 
 ## 3.5 `table_row_counts()` — 状态打印
 
@@ -424,7 +425,7 @@ return row[0]
 ## 3.9 测试覆盖
 
 ```bash
-pytest -q test_init_market_db.py
+pytest -q scripts/test_init_market_db.py
 # 预期：41 passed, 3 skipped（POSIX 权限测试在 Windows 上跳过）
 ```
 

@@ -1,17 +1,30 @@
-# 统一使用 LF
+# 1. 默认行为：自动检测文本文件，并在提交时统一转为 LF (Unix 风格)
 * text=auto eol=lf
 
-# 明确指定必须使用 LF
+# 2. 显式指定文本文件的换行符为 LF
 *.py text eol=lf
-*.sh text eol=lf
 *.md text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf
 *.toml text eol=lf
+*.json text eol=lf
+*.tex text eol=lf
+*.bib text eol=lf
 
-# 明确指定二进制文件，防止合并冲突
+# 3. Windows 专用脚本 (如果你有 .bat 或 .ps1) 保持 CRLF
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# 4. 标记为二进制文件（防止 Git 尝试去计算它们的差异或转换换行符）
+*.duckdb binary
+*.duckdb.wal binary
 *.parquet binary
-*.csv binary
+*.pdf binary
 *.png binary
 *.jpg binary
-*.db binary
+*.jpeg binary
+*.gif binary
+*.zip binary
+
+# 5. Jupyter Notebook (配合 nbstripout 使用)
+*.ipynb text eol=lf
