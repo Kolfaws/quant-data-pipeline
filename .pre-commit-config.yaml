@@ -1,16 +1,40 @@
+# 默认只检查暂存区更改的文件
+default_stages: [pre-commit]
+
 repos:
+  # 1. 基础文件检查器
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.5.0
+    rev: v4.6.0 # 升级到较新版本
     hooks:
       - id: check-yaml
-      - id: end-of-file-fixer
-      - id: trailing-whitespace
+      - id: check-toml
+      - id: check-json
+      - id: end-of-file-fixer # 确保文件以空行结尾
+      - id: trailing-whitespace # 移除行尾多余空格
+      - id: mixed-line-ending # 统一换行符，根据 .gitattributes 规则
       - id: check-added-large-files
-        args: ['--maxkb=1000'] # 拒绝超过 1MB 的文件，防止误传数据
+        args: ['--maxkb=1000'] # 拒绝超过 1MB 的文件
+      - id: detect-private-key # 防止 API Key 泄露
+      - id: no-commit-to-branch # 防止直接提交到 main/master 分支（保护主分支）
+        args: ['--branch', 'main', '--branch', 'master']
 
+  # 2. 代码风格与格式化 (Ruff)
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.3.0
+    rev: v0.7.1 # 与 requirements.txt 中的版本保持一致
     hooks:
       - id: ruff
         args: [ --fix ]
       - id: ruff-format
+
+  # 3. Jupyter Notebook 清理 (可选，如果有 notebook)
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.7.1
+    hooks:
+      - id: nbstripout # 自动清空 notebook 的输出内容和执行计数，防止仓库膨胀
+
+  # 4. 拼写检查 (针对论文和注释，可选)
+  - repo: https://github.com/codespell-project/codespell
+    rev: v2.3.0
+    hooks:
+      - id: codespell
+        exclude: ^(.*\.ipynb|.*\.svg|.*\.csv)$ # 忽略 notebook 和数据文件
