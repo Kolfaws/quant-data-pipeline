@@ -174,7 +174,7 @@ with factor.database("data/market.duckdb") as con:
 
 `value` 与 `is_stale` 拆开的原因：停牌期间不应静默填充。若业务需要 forward-fill，填充值标 `is_stale = TRUE`，回测可用 `v_factor_valid` 过滤，避免虚假信号进入组合。
 
-物理排序建议：写入时 `ORDER BY trade_date, ts_code`（或按日分批写入），让 zone map 在日期过滤上剪枝更有效。若团队以单股票时序研究为主，可改 `(ts_code, trade_date)`——**选一种，不要混**，否则 zone map 收益被稀释。
+物理排序建议：写入时 `ORDER BY trade_date, ts_code`（或按日分批写入），让 zone map 在日期过滤上剪枝更有效。若团队以单股票时序研究为主，可改 `(ts_code, trade_date)`——选一种，不要混，否则 zone map 收益被稀释。
 
 ### 2.4 `fact_tradable_flag` — 可交易性标志
 
@@ -202,7 +202,7 @@ is_buyable     = NOT is_suspended AND NOT is_limit_up   AND in_universe
 is_sellable    = NOT is_suspended AND NOT is_limit_down AND in_universe
 ```
 
-`is_st` 依赖日频 ST 快照。warehouse 当前只有 `dim_stock_basic.name` 的**当前**快照，是已知局限。无法补日频 ST 时，factor 层先置 `FALSE`，并在 `meta_ingest_log.detail` 或质量表里记录「ST 未覆盖」——**不要伪造历史 ST**。
+`is_st` 依赖日频 ST 快照。warehouse 当前只有 `dim_stock_basic.name` 的当前快照，这是已知局限。无法补日频 ST 时，factor 层先置 `FALSE`，并在 `meta_ingest_log.detail` 或质量表里记录「ST 未覆盖」——不要伪造历史 ST。
 
 ### 2.5 `fact_factor_quality` — 批次质量快照
 
@@ -248,9 +248,9 @@ JOIN fact_tradable_flag t
 WHERE t.is_buyable = TRUE OR t.is_sellable = TRUE;
 ```
 
-**语义边界（重要）**：
+**语义边界**：
 
-- 这个条件是「至少一个方向可交易」。涨停股 `is_buyable = FALSE` 但 `is_sellable = TRUE`，**会被保留**——因为对持仓方它是可卖的。
+- 该条件是「至少一个方向可交易」。涨停股 `is_buyable = FALSE` 但 `is_sellable = TRUE`，会被保留——因为对持仓方它是可卖的。
 - 方向过滤必须由策略层完成：买入日加 `AND t.is_buyable`，卖出日加 `AND t.is_sellable`；或用 `fact_tradable_flag` 直接 join。
 - 若上游 `fact_tradable_flag` 有重复 `(ts_code, trade_date)`，视图会放大行数；管道必须先按该键去重。
 
@@ -272,7 +272,7 @@ fact_stk_limit        ──┘     fact_factor_quality
                               v_factor_wide / v_factor_valid
 ```
 
-factor 层只读 warehouse 的表，只写自己的 `meta_factor_*` / `fact_factor_*` / `fact_tradable_flag` / `v_*`。**不重建 `fact_daily` 等行情表，不改动其结构。**
+factor 层只读 warehouse 的表，只写自己的 `meta_factor_*` / `fact_factor_*` / `fact_tradable_flag` / `v_*`。不重建 `fact_daily` 等行情表，不改动其结构。
 
 ### 3.2 类型对齐（强制）
 
@@ -426,7 +426,7 @@ row_count  = 写入行数
 
 `v_factor_wide` 单年约 125 万行 × (2 + 200) 列；PIVOT 聚合峰值内存可能接近值数据规模（~2 GB）加哈希表开销。带日期过滤查询，或把核心因子物化。
 
-`table_row_counts` 用精确 `count(*)`，对 2.5 亿行的表是全表扫描——CLI 在超大库上会慢，这是「精确语义」的代价。
+`table_row_counts` 用精确 `count(*)`，对 2.5 亿行的表是全表扫描——CLI 在超大库上会慢，这是精确语义的代价。
 
 ---
 
@@ -565,7 +565,7 @@ WHERE trade_date >= DATE '2024-01-01' AND trade_date < DATE '2025-01-01';
 3. `installed_version(con, component="warehouse")` 增加参数，默认值保持向后兼容；
 4. CLI 日志打印 `component=warehouse`。
 
-`verify_schema` / `table_row_counts` / `connect` 完全不变：factor 表是「额外对象」，market 的严格校验只看自己的 `TABLES`，不会因为库里多了 factor 表而失败。
+`verify_schema` / `table_row_counts` / `connect` 完全不变：factor 表是额外对象，market 的严格校验只看自己的 `TABLES`，不会因为库里多了 factor 表而失败。
 
 ---
 
@@ -635,7 +635,7 @@ WHERE trade_date >= DATE '2024-01-01' AND trade_date < DATE '2025-01-01';
 6. **上游去重是最大正确性风险**：无主键 + 重跑批次会留下重复行，窗口函数静默错算。短期靠管道 SQL + quality 告警，长期应在摄入端约束。
 7. **DuckDB 不是多写者数据库**：未来多团队并发写因子时，迁 ClickHouse / PostgreSQL / 专用特征库；DuckDB 保留为研究快照与 Parquet 归档格式。
 
-**若假设不成立需如何调整**：若你的 DuckDB 版本不支持 `PIVOT ... USING FIRST` 或视图内 `ORDER BY`，会自动走条件聚合回退（已实现，测试覆盖 `test_wide_view_refresh_reflects_active_factors`），无需改代码；若必须独立 `factor.duckdb`，则 `v_factor_valid` 需改为跨库 `ATTACH` 引用，`_require_warehouse` 也要改成检查 ATTACH 别名而非同库表名——这一改动会连带影响 `verify_schema` 与全部测试夹具，属于独立方案，建议单开一版。
+**若假设不成立需如何调整**：若 DuckDB 版本不支持 `PIVOT ... USING FIRST` 或视图内 `ORDER BY`，会自动走条件聚合回退（已实现，测试覆盖 `test_wide_view_refresh_reflects_active_factors`），无需改代码；若必须独立 `factor.duckdb`，则 `v_factor_valid` 需改为跨库 `ATTACH` 引用，`_require_warehouse` 也要改成检查 ATTACH 别名而非同库表名——这一改动会连带影响 `verify_schema` 与全部测试夹具，属于独立方案，建议单开一版。
 
 ---
 
