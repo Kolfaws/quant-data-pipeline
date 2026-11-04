@@ -8,7 +8,7 @@
 
 ## 1. 架构总览
 
-本项目按职责分为几个核心模块，数据层采用**单库多组件**架构：`warehouse` 与 `factor` 共用同一个 DuckDB 文件。
+本项目按职责分为几个核心模块，数据层采用单库多组件架构：`warehouse` 与 `factor` 共用同一个 DuckDB 文件。
 
 - **Warehouse 组件（基础库）**：基于 DuckDB 初始化基础行情结构、建表、建视图（`scripts/init_market_db.py`）。该组件作为单一数据源，结构保持稳定。
 - **Factor 组件（因子层）**：factor 组件追加在同一个 DuckDB 文件中（`scripts/init_factor_db.py`），通过 `meta_schema_version` 里 `component = 'factor'` 的版本行与 warehouse 隔离。因子表与宽表视图可以直接 JOIN 行情表，无需跨库 `ATTACH`。
@@ -17,7 +17,7 @@
 - **Update**：增量更新历史数据到 DuckDB（`src/data_pipeline/cli.py` 调度）。
 - **Sink**：负责将处理好的数据写入数据库（`src/data_pipeline/core/sink.py`）。
 
-> **为什么单库**：DuckDB 的写锁以文件为单位，拆成两个文件并不能解决单写者冲突，反而会让 `v_factor_valid` 必须跨库 `ATTACH`。拆库阈值与迁移方案见 [docs/init_factor_db.md](docs/init_factor_db.md) 第 12 节。
+> **单库原因**：DuckDB 的写锁以文件为单位，拆成两个文件并不能解决单写者冲突，反而会让 `v_factor_valid` 必须跨库 `ATTACH`。拆库阈值与迁移方案见 [docs/init_factor_db.md](docs/init_factor_db.md) 第 12 节。
 
 ## 2. 快速开始
 
@@ -64,7 +64,7 @@ python scripts/init_factor_db.py check   --db data/market.duckdb
 python scripts/init_factor_db.py refresh --db data/market.duckdb
 ```
 
-两个脚本必须指向**同一个库文件**，并按 `warehouse → factor` 的顺序执行。DuckDB 是跨进程单写者，初始化期间不要并发写入。
+两个脚本必须指向同一个库文件，并按 `warehouse → factor` 的顺序执行。DuckDB 是跨进程单写者，初始化期间不要并发写入。
 
 等价的 Makefile 命令：
 
@@ -137,7 +137,7 @@ quant-data-pipeline/
 
 ### 4.2 因子组件初始化 (`init_factor_db`)
 
-在同一个 DuckDB 文件中追加 factor 表、视图与 `component = 'factor'` 版本行。**必须先完成 `init_market_db`**（warehouse 版本 >= `1.1.0`），否则在建表前直接 `SchemaError` 失败；因子目录（`meta_factor_registry`）变更后必须执行 `refresh` 重建 `v_factor_wide`，否则宽表列不会更新。详见 [docs/init_factor_db.md](docs/init_factor_db.md)。
+在同一个 DuckDB 文件中追加 factor 表、视图与 `component = 'factor'` 版本行。必须先完成 `init_market_db`（warehouse 版本 >= `1.1.0`），否则在建表前直接 `SchemaError` 失败；因子目录（`meta_factor_registry`）变更后必须执行 `refresh` 重建 `v_factor_wide`，否则宽表列不会更新。详见 [docs/init_factor_db.md](docs/init_factor_db.md)。
 
 ### 4.3 数据拉取 (`fetch`)
 
@@ -187,3 +187,6 @@ pytest -q scripts/test_init_market_db.py scripts/test_init_factor_db.py
 ```
 
 > Windows 下 POSIX 文件权限相关用例会自动跳过，其余用例应全绿。
+
+---
+END OF FILE
