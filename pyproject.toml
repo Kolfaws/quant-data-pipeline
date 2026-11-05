@@ -1,67 +1,23 @@
 [project]
 name = "quant-data-pipeline"
 version = "0.1.0"
-description = "模块化 A 股日频量化数据管道（DuckDB warehouse + factor 单库多组件）"
-readme = "README.md"
-requires-python = ">=3.10"
-keywords = ["quant", "duckdb", "data-pipeline", "tushare", "factor"]
-classifiers = [
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
-    "Topic :: Office/Business :: Financial :: Investment",
+description = "A data pipeline for quantitative finance"
+authors = [
+    { name = "Kalofaws"}
 ]
+requires-python = ">=3.13"
 dependencies = [
-    "duckdb>=1.1.0,<2.0.0",
-    "loguru>=0.7.0,<1.0.0",
-    "pandas>=2.0.0,<3.0.0",
-    "polars>=1.0.0,<2.0.0",
-    "pydantic>=2.0.0,<3.0.0",
-    "python-dotenv>=1.0.0,<2.0.0",
-    "tushare>=1.2.0",
-]
-
-[project.optional-dependencies]
-dev = [
-    "pre-commit>=3.7.0",
-    "pytest>=8.0.0",
-    "pytest-cov>=5.0.0",
-    "ruff>=0.7.0",
+    "duckdb>=2.0.0",
+    "numpy>=2.5.4",
+    "pandas>=3.1.1",
+    "polars>=2.1.0",
+    "seaborn>=0.13.2",
+    "tushare>=1.4.29",
 ]
 
 [project.scripts]
-quant-data-pipeline = "data_pipeline.cli:main"
+quant-data-pipeline = "quant_data_pipeline:main"
 
 [build-system]
 requires = ["uv_build>=0.13.7,<0.14.0"]
 build-backend = "uv_build"
-
-[tool.uv.build-backend]
-# 实际包位于 src/data_pipeline，与项目名 quant-data-pipeline 不同名
-module-name = "data_pipeline"
-module-root = "src"
-
-[tool.ruff]
-target-version = "py310"
-line-length = 88
-src = ["src", "scripts", "tests"]
-
-[tool.ruff.lint]
-# 现有代码尚未整理 import 顺序，先只启用基础错误规则；整理后可加 I / UP / B / SIM
-select = ["E4", "E7", "E9", "F"]
-
-[tool.ruff.lint.per-file-ignores]
-# 测试里预留但不使用的连接变量
-"scripts/test_*.py" = ["F841"]
-
-[tool.pytest.ini_options]
-minversion = "8.0"
-testpaths = ["tests", "scripts"]
-pythonpath = ["src"]
-addopts = "-ra"
-
-[tool.coverage.run]
-source = ["data_pipeline"]
