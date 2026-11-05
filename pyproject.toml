@@ -11,7 +11,7 @@ dependencies = [
     "numpy>=2.5.4",
     "pandas>=3.1.1",
     "polars>=2.1.0",
-    "seaborn>=0.13.2",
+    "pyarrow>=26.0.1",
     "tushare>=1.4.29",
 ]
 
