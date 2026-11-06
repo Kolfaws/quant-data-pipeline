@@ -2,8 +2,10 @@
 
 该模块只负责三件事：建表、建视图、校验结构。不负责数据摄入，不修改既有数据，用于在数据管道启动前把库结构准备到可用且可验证的状态。
 
-- **Schema 版本**：`1.1.0`
-- **默认库路径**：来自 `src.data_pipeline.config.DUCKDB_PATH`，回退 `data/market.duckdb`
+- **Schema 版本**：`1.2.0`（`quant-db-schema` 项目的 `quant_schema.constants.WAREHOUSE_SCHEMA_VERSION`）
+- **DDL 来源**：`quant_schema.market_ddl.WAREHOUSE_TABLES / WAREHOUSE_VIEWS`
+- **默认库路径**：来自 `data_pipeline.config.DUCKDB_PATH`，回退 `data/market.duckdb`；
+  推荐显式传 `--db "${MARKET_DB_PATH}"`
 - **默认资源**：`threads=6`、`memory_limit="6GB"`
 
 ---
@@ -29,11 +31,11 @@ Constraints: import 本模块 -> connect()/database() 拿连接 -> init_schema(c
 ## 1.2 CLI Conventions
 
 ```bash
-python init_market_db.py init  --db data/market.duckdb
-python init_market_db.py check --db data/market.duckdb
+python init_market_db.py init  --db "${MARKET_DB_PATH}"
+python init_market_db.py check --db "${MARKET_DB_PATH}"
 
 python init_market_db.py init \
-  --db data/market.duckdb \
+  --db "${MARKET_DB_PATH}" \
   --threads 6 \
   --memory-limit 6GB \
   --temp-dir /tmp/duck_spill \
@@ -63,17 +65,17 @@ python init_market_db.py init \
 import init_market_db as mod
 
 # 推荐：上下文管理器，退出即关闭
-with mod.database("data/market.duckdb") as con:
+with mod.database("${MARKET_DB_PATH}") as con:
     mod.init_schema(con)
-    print(mod.installed_version(con))    # "1.1.0"
+    print(mod.installed_version(con))    # "1.2.0"
     print(mod.table_row_counts(con))
 
 # 只读复用
-with mod.database("data/market.duckdb", read_only=True) as con:
+with mod.database("${MARKET_DB_PATH}", read_only=True) as con:
     mod.verify_schema(con)
 
 # 手动管理
-con = mod.connect("data/market.duckdb", threads=8, memory_limit="8GB")
+con = mod.connect("${MARKET_DB_PATH}", threads=8, memory_limit="8GB")
 try:
     mod.init_schema(con)
 finally:
@@ -120,7 +122,7 @@ finally:
 
 # 2. Database Schema
 
-`SCHEMA_VERSION = "1.1.0"`。共 8 张表 + 2 个视图。
+`SCHEMA_VERSION = "1.2.0"`。共 11 张表 + 2 个视图。
 
 ## 2.1 Overview
 
@@ -128,21 +130,24 @@ finally:
 | --- | --- | --- | --- |
 | 1 | `meta_schema_version` | 表 | `component` |
 | 2 | `meta_ingest_log` | 表 | `(table_name, scope_key)` |
-| 3 | `dim_stock_basic` | 表 | 无 |
-| 4 | `dim_trade_cal` | 表 | 无 |
-| 5 | `fact_daily` | 表 | 无 |
-| 6 | `fact_adj_factor` | 表 | 无 |
-| 7 | `fact_daily_basic` | 表 | 无 |
-| 8 | `fact_stk_limit` | 表 | 无 |
-| 9 | `v_daily_qfq` | 视图 | — |
-| 10 | `v_daily_hfq` | 视图 | — |
+| 3 | `dim_stock_basic` | 表 | `ts_code` |
+| 4 | `dim_trade_cal` | 表 | `(exchange, cal_date)` |
+| 5 | `fact_daily` | 表 | `(ts_code, trade_date)` |
+| 6 | `fact_adj_factor` | 表 | `(ts_code, trade_date)` |
+| 7 | `fact_daily_basic` | 表 | `(ts_code, trade_date)` |
+| 8 | `fact_stk_limit` | 表 | `(ts_code, trade_date)` |
+| 9 | `fact_index_daily` | 表 | `(index_code, trade_date)` |
+| 10 | `fact_index_weight` | 表 | `(index_code, trade_date, con_code)` |
+| 11 | `fact_fund_daily` | 表 | `(ts_code, trade_date)` |
+| 12 | `v_daily_qfq` | 视图 | — |
+| 13 | `v_daily_hfq` | 视图 | — |
 
 ## 2.2 `meta_schema_version` — schema 版本记录
 
 | 字段 | 类型 | 约束 | 说明 |
 | --- | --- | --- | --- |
 | `component` | `VARCHAR` | `NOT NULL` | 组件名；warehouse 固定 `'warehouse'`，factor 组件为 `'factor'` |
-| `version` | `VARCHAR` | `NOT NULL` | schema 版本号，当前 `1.1.0` |
+| `version` | `VARCHAR` | `NOT NULL` | schema 版本号，warehouse 当前 `1.2.0`，factor 为 `1.0.0` |
 | `applied_at` | `TIMESTAMPTZ` | `NOT NULL DEFAULT current_timestamp` | 版本生效时间 |
 
 约束：`PRIMARY KEY (component)`
@@ -284,7 +289,54 @@ finally:
 
 注意：`v_daily_hfq` 不输出 `chg` 与 `pct_chg`。
 
-## 2.12 类型与命名约定
+## 2.12 `fact_index_daily` — 指数日线（v1.2.0）
+
+| 字段 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| `index_code` | `VARCHAR` | `NOT NULL` | 指数代码，如 `000300.SH` |
+| `trade_date` | `DATE` | `NOT NULL` | 交易日 |
+| `open` / `high` / `low` / `close` | `DOUBLE` | 可空 | 指数点位 |
+| `pre_close` | `DOUBLE` | 可空 | 昨收点位 |
+| `chg` | `DOUBLE` | 可空 | 涨跌点数 |
+| `pct_chg` | `DOUBLE` | 可空 | 涨跌幅（百分数，如 `1.23` 表示 1.23%） |
+| `vol` | `DOUBLE` | 可空 | 成交量 |
+| `amount` | `DECIMAL(20,4)` | 可空 | 成交额 |
+
+约束：`PRIMARY KEY (index_code, trade_date)`
+
+用途：quant-baseline 的外部指数基准（如沪深300）从这里读，不再自行抓行情。
+
+## 2.13 `fact_index_weight` — 指数成分权重（v1.2.0）
+
+| 字段 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| `index_code` | `VARCHAR` | `NOT NULL` | 指数代码 |
+| `trade_date` | `DATE` | `NOT NULL` | 权重快照日 |
+| `con_code` | `VARCHAR` | `NOT NULL` | 成分代码 |
+| `weight` | `DOUBLE` | 可空 | 权重（0-1 或百分数，由数据源决定） |
+
+约束：`PRIMARY KEY (index_code, trade_date, con_code)`
+
+用途：quant-baseline 的动态标的池（`constituents_source.kind=warehouse`）。
+
+## 2.14 `fact_fund_daily` — ETF/基金日线（v1.2.0）
+
+| 字段 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| `ts_code` | `VARCHAR` | `NOT NULL` | 基金代码 |
+| `trade_date` | `DATE` | `NOT NULL` | 交易日 |
+| `open` / `high` / `low` / `close` | `DOUBLE` | 可空 | 二级市场价格 |
+| `pre_close` | `DOUBLE` | 可空 | 昨收 |
+| `chg` / `pct_chg` | `DOUBLE` | 可空 | 涨跌额 / 涨跌幅 |
+| `vol` | `DOUBLE` | 可空 | 成交量 |
+| `amount` | `DECIMAL(20,4)` | 可空 | 成交额 |
+
+约束：`PRIMARY KEY (ts_code, trade_date)`
+
+用途：quant-baseline 的 ETF 基准。Tushare `fund_daily` 需要单独权限，
+无权限时该表为空，对应基准保持 `enabled: false`。
+
+## 2.15 类型与命名约定
 
 | 约定 | 内容 |
 | --- | --- |
@@ -301,6 +353,9 @@ finally:
 # 3. Explanation of Implementation
 
 ## 3.1 `connect()` — 连接构造
+
+`init_market_db.connect` / `database` 是 `data_pipeline.db` 的别名；连接器由
+`src/data_pipeline/db.py` 统一维护，quant-baseline / quant-backtest-engine 复用同一份实现。
 
 流程：
 
@@ -411,14 +466,14 @@ return row[0]
 
 ## 3.8 配置加载
 
-`_load_config_defaults()` 在函数内做 `sys.path` 注入与 import：
+`data_pipeline.config` 是 `quant-data-pipeline` 包内的模块，由 editable 依赖直接安装；
+`scripts/init_market_db.py` 不再修改 `sys.path`。
 
-1. `root_dir = Path(__file__).resolve().parent.parent`（要求 `init_market_db.py` 位于 `src/` 下）；
-2. `from src.data_pipeline.config import DUCKDB_PATH, LOG_LEVEL`；
-3. `DUCKDB_PATH` 为空 → 回退 `data/market.duckdb`；
-4. `ImportError` / `ModuleNotFoundError` → 整体回退 `data/market.duckdb` / `INFO`。
+1. `from data_pipeline.config import DUCKDB_PATH, LOG_LEVEL`；
+2. `DUCKDB_PATH` 为空 → 回退 `data/market.duckdb`；
+3. 数据库路径/Token 由 `.env` 或环境变量提供。
 
-放在函数内而不是 module 顶层，是为了避免 import 本模块时污染 `sys.path`，也避免 config 不可用时 import 直接失败。
+推荐在 `.env` 里显式写 `DUCKDB_PATH=/absolute/path/to/market.duckdb`，或 CLI 传 `--db`。
 
 > 注意：`threads` / `memory_limit` 不从 config 读，只走 CLI 或显式传参。
 
@@ -452,6 +507,7 @@ pytest -q scripts/test_init_market_db.py
 
 | 版本 | 变更 |
 | --- | --- |
+| `1.2.0` | DDL 迁移到 `quant_schema.market_ddl`；新增 `fact_index_daily` / `fact_index_weight` / `fact_fund_daily`；为 `dim_stock_basic` / `dim_trade_cal` / 四张 fact 表补主键；连接器迁移到 `data_pipeline.db` |
 | `1.1.0` | 新增 `v_daily_qfq` / `v_daily_hfq` 视图；`TIMESTAMPTZ` 归一化；`_scalar` 无行抛 `SchemaError`；CLI 退出码 0/1/2；`init_schema` 改显式事务；`verify_schema` 提前到建视图前；版本 upsert 用 `now()`；`memory_limit` 正则禁止中间空格 |
 | `1.0.0` | 初始 schema（8 张表 + 版本记录 + 幂等初始化） |
 

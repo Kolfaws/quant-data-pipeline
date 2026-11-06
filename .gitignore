@@ -8,24 +8,28 @@
 *.key
 
 # =====================================
-# 2. 数据文件
+# 2. 数据文件 (量化项目常见)
 # =====================================
-# 忽略 data 下的所有文件
+# 忽略 data 下的所有文件，但保留目录结构和 .gitkeep
 data/**
-# 保留文件夹本身，以及内部的 .gitkeep
-!data/
+!data/.gitkeep
 !data/raw/
 !data/processed/
 !data/**/.gitkeep
+
+# 常见数据文件格式
 *.parquet
 *.csv
 *.xlsx
 *.db
 *.duckdb
 *.sqlite
+*.sqlite3
 *.h5
+*.hdf5
 *.pkl
 *.feather
+*.arrow
 
 # =====================================
 # 3. Python 运行缓存与构建产物
@@ -37,8 +41,8 @@ __pycache__/
 .Python
 build/
 dist/
-.eggs/
 *.egg-info/
+.eggs/
 .installed.cfg
 *.egg
 
@@ -48,12 +52,14 @@ dist/
 .venv/
 venv/
 env/
+ENV/
 
 # =====================================
 # 5. 日志文件
 # =====================================
 *.log
-logs/
+logs/**
+!logs/.gitkeep
 
 # =====================================
 # 6. 测试与类型检查缓存
@@ -62,6 +68,7 @@ logs/
 .mypy_cache/
 .ruff_cache/
 .coverage
+coverage.xml
 htmlcov/
 
 # =====================================
@@ -71,3 +78,10 @@ htmlcov/
 Thumbs.db
 .idea/
 .vscode/
+*.swp
+*.swo
+
+# =====================================
+# 8. Jupyter Notebook 检查点
+# =====================================
+.ipynb_checkpoints/

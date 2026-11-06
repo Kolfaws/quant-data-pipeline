@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-init_factor_db.py — factor DuckDB 组件结构初始化
+init_factor_db.py — factor DuckDB 组件结构初始化（market.duckdb）
 
 Rules:
     只追加 factor 组件结构，不重建 warehouse 行情表，不写入业务数据。
+    表结构定义来自 quant_schema.market_ddl，本脚本只负责事务、校验与版本。
 Constraints:
     先执行 init_market_db.init，再执行 init_factor_db.init；
     同一 DuckDB 文件跨进程只允许一个 RW 连接，初始化与批次写入均需串行。
 
 用法：
-    python init_factor_db.py init    --db data/market.duckdb
-    python init_factor_db.py check   --db data/market.duckdb
-    python init_factor_db.py refresh --db data/market.duckdb   # 因子目录变更后重建宽表视图
+    python init_factor_db.py init    --db "$DUCKDB_PATH"
+    python init_factor_db.py check   --db "$DUCKDB_PATH"
+    python init_factor_db.py refresh --db "$DUCKDB_PATH"   # 因子目录变更后重建宽表视图
 
 复杂度：
     init_schema   O(T + F + C)
     verify_schema O(C + F)
     refresh_views O(F)
-    T = 表数（6），F = 活跃因子数，C = 列数
+    T = 表数（4），F = 活跃因子数，C = 列数
 """
 
 from __future__ import annotations
@@ -32,32 +32,28 @@ from pathlib import Path
 from typing import Final
 
 import duckdb
-
-try:
-    if __package__:
-        from . import init_market_db as _market
-    else:
-        import init_market_db as _market
-except ImportError as exc:  # pragma: no cover - 启动期依赖错误
-    raise ImportError(
-        "init_factor_db 依赖 init_market_db.py；请将两者放在同一目录，"
-        "或确保 scripts/ 在 sys.path"
-    ) from exc
+import init_market_db as _market
+from quant_schema._ddl import Table, normalise_type
+from quant_schema.constants import FACTOR_COMPONENT, FACTOR_SCHEMA_VERSION
+from quant_schema.market_ddl import (
+    FACTOR_REQUIRED_WAREHOUSE_TABLES,
+    FACTOR_STATIC_VIEWS,
+    FACTOR_TABLES,
+)
 
 LOG = logging.getLogger("init_factor_db")
 
-SCHEMA_VERSION: Final[str] = "1.0.0"
-COMPONENT: Final[str] = "factor"
+SCHEMA_VERSION: Final[str] = FACTOR_SCHEMA_VERSION
+COMPONENT: Final[str] = FACTOR_COMPONENT
 MIN_WAREHOUSE_VERSION: Final[str] = "1.1.0"
 
 # 复用 market 的异常与连接器，保证两个模块的资源策略完全一致。
 ConfigError = _market.ConfigError
 SchemaError = _market.SchemaError
-Table = _market.Table
 connect = _market.connect
 database = _market.database
 _scalar = _market._scalar
-_normalise_type = _market._normalise_type
+_normalise_type = normalise_type
 
 DEFAULT_DB_PATH: Final[Path] = _market.DEFAULT_DB_PATH
 DEFAULT_THREADS: Final[int] = _market.DEFAULT_THREADS
@@ -81,100 +77,16 @@ if {table.name for table in SHARED_TABLES} != set(_SHARED_TABLE_NAMES):
         "init_market_db.TABLES 缺少共享基础表，无法保证 factor 组件结构一致"
     )
 
-FACTOR_TABLES: Final[tuple[Table, ...]] = (
-    Table(
-        name="meta_factor_registry",
-        columns=(
-            ("factor_id", "INTEGER NOT NULL"),
-            ("factor_name", "VARCHAR NOT NULL"),
-            ("factor_group", "VARCHAR"),
-            ("value_type", "VARCHAR NOT NULL"),
-            ("direction", "SMALLINT NOT NULL DEFAULT 1"),
-            ("lookback_days", "INTEGER"),
-            ("formula_hash", "VARCHAR"),
-            ("description", "VARCHAR"),
-            ("is_active", "BOOLEAN NOT NULL DEFAULT TRUE"),
-        ),
-        constraints=(
-            "PRIMARY KEY (factor_id)",
-            "UNIQUE (factor_name)",
-        ),
-    ),
-    Table(
-        name="fact_factor_daily",
-        columns=(
-            ("ts_code", "VARCHAR NOT NULL"),
-            ("trade_date", "DATE NOT NULL"),
-            ("factor_id", "INTEGER NOT NULL"),
-            ("value", "DOUBLE"),
-            ("is_stale", "BOOLEAN NOT NULL DEFAULT FALSE"),
-            ("source_batch_id", "BIGINT"),
-        ),
-    ),
-    Table(
-        name="fact_tradable_flag",
-        columns=(
-            ("ts_code", "VARCHAR NOT NULL"),
-            ("trade_date", "DATE NOT NULL"),
-            ("is_suspended", "BOOLEAN NOT NULL"),
-            ("is_st", "BOOLEAN NOT NULL"),
-            ("is_limit_up", "BOOLEAN NOT NULL"),
-            ("is_limit_down", "BOOLEAN NOT NULL"),
-            ("is_buyable", "BOOLEAN NOT NULL"),
-            ("is_sellable", "BOOLEAN NOT NULL"),
-            ("in_universe", "BOOLEAN NOT NULL"),
-        ),
-    ),
-    Table(
-        name="fact_factor_quality",
-        columns=(
-            ("factor_id", "INTEGER NOT NULL"),
-            ("trade_date", "DATE NOT NULL"),
-            ("n_total", "BIGINT NOT NULL"),
-            ("n_valid", "BIGINT NOT NULL"),
-            ("n_stale", "BIGINT NOT NULL"),
-            ("n_outlier", "BIGINT NOT NULL"),
-            ("coverage", "DOUBLE NOT NULL"),
-            ("computed_at", "TIMESTAMPTZ NOT NULL DEFAULT now()"),
-        ),
-    ),
-)
-
 TABLES: Final[tuple[Table, ...]] = SHARED_TABLES + FACTOR_TABLES
-
-# 注意：is_buyable OR is_sellable 会保留“可卖不可买”的涨停股；
-# 方向过滤必须由策略层用 fact_tradable_flag 的对应列完成，视图不做方向假设。
-_V_FACTOR_VALID_SQL: Final[str] = """
-SELECT
-    f.ts_code,
-    f.trade_date,
-    f.factor_id,
-    f.value,
-    f.is_stale
-FROM fact_factor_daily f
-JOIN fact_tradable_flag t
-  ON t.ts_code = f.ts_code
- AND t.trade_date = f.trade_date
-WHERE t.is_buyable = TRUE
-   OR t.is_sellable = TRUE
-""".strip()
 
 # v_factor_wide 的 SQL 动态生成；None 表示“由 _create_wide_view 负责”。
 VIEWS: Final[dict[str, str | None]] = {
     "v_factor_wide": None,
-    "v_factor_valid": _V_FACTOR_VALID_SQL,
+    "v_factor_valid": FACTOR_STATIC_VIEWS["v_factor_valid"],
 }
 VIEW_NAMES: Final[tuple[str, ...]] = tuple(VIEWS)
 
-REQUIRED_WAREHOUSE_TABLES: Final[tuple[str, ...]] = (
-    "meta_ingest_log",
-    "dim_stock_basic",
-    "dim_trade_cal",
-    "fact_daily",
-    "fact_adj_factor",
-    "fact_daily_basic",
-    "fact_stk_limit",
-)
+REQUIRED_WAREHOUSE_TABLES: Final[tuple[str, ...]] = FACTOR_REQUIRED_WAREHOUSE_TABLES
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +124,6 @@ def _relation_columns(
     con: duckdb.DuckDBPyConnection,
     name: str,
 ) -> list[tuple[str, str]]:
-    # SECURITY: name 只允许来自 VIEW_NAMES 常量，f-string 无外部输入。
     if name not in VIEW_NAMES:
         raise ValueError(f"未知视图：{name}")
     rows = con.execute(f'DESCRIBE "{name}"').fetchall()
@@ -246,18 +157,13 @@ def installed_version(
     con: duckdb.DuckDBPyConnection,
     component: str = COMPONENT,
 ) -> str | None:
-    """
-    返回指定组件版本。
-
-    factor 模块默认 component='factor'；可显式传 'warehouse' 查询依赖版本。
-    行不存在返回 None；meta_schema_version 表不存在时抛 duckdb.Error。
-    """
+    """返回指定组件版本；默认 'factor'，可显式查询 'warehouse'。"""
     component = _validate_component(component)
-    row = con.execute(
+    rows = con.execute(
         "SELECT version FROM meta_schema_version WHERE component = ?",
         [component],
-    ).fetchone()
-    return None if row is None else str(row[0])
+    ).fetchall()
+    return None if not rows else str(rows[0][0])
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +178,6 @@ def _active_factor_ids(con: duckdb.DuckDBPyConnection) -> list[int]:
 
 
 def _pivot_sql(active_ids: Sequence[int]) -> str:
-    # SECURITY: active_ids 均经 int() 转换，SQL 中只出现整数。
     in_list = ", ".join(str(int(fid)) for fid in active_ids)
     return (
         "PIVOT fact_factor_daily "
@@ -285,7 +190,6 @@ def _pivot_sql(active_ids: Sequence[int]) -> str:
 
 def _conditional_wide_sql(active_ids: Sequence[int]) -> str:
     """回退路径：条件聚合，保证空表时也能得到固定列数。"""
-    # SECURITY: 同上，只拼 int。
     projected = ["ts_code", "trade_date"]
     for fid in active_ids:
         projected.append(
@@ -322,7 +226,6 @@ def _create_wide_view(
         if actual != expected:
             raise SchemaError(f"PIVOT 列数 {actual} != {expected}，回退条件聚合")
     except (duckdb.Error, SchemaError) as exc:
-        # PERF: 正常路径一条 DDL；仅空表/旧 DuckDB 会进入回退。
         LOG.warning("PIVOT 创建 v_factor_wide 失败，回退条件聚合：%s", exc)
         con.execute(
             f'CREATE OR REPLACE VIEW "v_factor_wide" AS '
@@ -331,9 +234,11 @@ def _create_wide_view(
 
 
 def _create_views(con: duckdb.DuckDBPyConnection) -> None:
-    # PERF: O(F)，F 为活跃因子数（通常 <= 200）。
     _create_wide_view(con, _active_factor_ids(con))
-    con.execute(f'CREATE OR REPLACE VIEW "v_factor_valid" AS {_V_FACTOR_VALID_SQL}')
+    con.execute(
+        f'CREATE OR REPLACE VIEW "v_factor_valid" AS '
+        f"{FACTOR_STATIC_VIEWS['v_factor_valid']}"
+    )
 
 
 def _verify_views(con: duckdb.DuckDBPyConnection) -> None:
@@ -368,12 +273,7 @@ def verify_schema(
     *,
     verify_views: bool = True,
 ) -> None:
-    """
-    严格比对共享表 + factor 表。
-
-    - 缺表 / 缺列 / 类型漂移 / 多余列 -> SchemaError
-    - verify_views=True 时同时校验两个视图存在且列数正确
-    """
+    """严格比对共享表 + factor 表；结构漂移抛 SchemaError。"""
     _require_warehouse(con)
 
     rows = con.execute(
@@ -383,7 +283,7 @@ def verify_schema(
 
     actual: dict[str, dict[str, str]] = {}
     for table_name, column_name, data_type in rows:
-        actual.setdefault(str(table_name), {})[str(column_name)] = _normalise_type(
+        actual.setdefault(str(table_name), {})[str(column_name)] = normalise_type(
             str(data_type)
         )
 
@@ -421,12 +321,7 @@ def init_schema(
     *,
     verify: bool = True,
 ) -> None:
-    """
-    幂等初始化 factor 组件。
-
-    顺序：依赖检查 -> 建表 -> 校验表 -> 建视图 -> 校验视图 -> 写 factor 版本
-    """
-    # LEAK: 显式事务，异常时 ROLLBACK；连接生命周期仍归调用方。
+    """幂等初始化 factor 组件（单事务）。"""
     con.execute("BEGIN TRANSACTION")
     try:
         _require_warehouse(con)
@@ -435,7 +330,6 @@ def init_schema(
             con.execute(table.ddl())
 
         if verify:
-            # 先校验、后建视图：残缺表以 SchemaError 暴露，而不是 BinderException。
             verify_schema(con, verify_views=False)
 
         _create_views(con)
@@ -443,7 +337,6 @@ def init_schema(
         if verify:
             _verify_views(con)
 
-        # SECURITY: component/version 均走参数绑定。
         con.execute(
             "INSERT INTO meta_schema_version (component, version) "
             "VALUES (?, ?) "
@@ -459,11 +352,7 @@ def init_schema(
 
 
 def refresh_views(con: duckdb.DuckDBPyConnection) -> None:
-    """
-    在因子目录变更后重建 v_factor_wide / v_factor_valid。
-
-    注意：本函数自行 BEGIN/COMMIT，不能在调用方已开启的事务中调用。
-    """
+    """在因子目录变更后重建 v_factor_wide / v_factor_valid（自带事务）。"""
     con.execute("BEGIN TRANSACTION")
     try:
         verify_schema(con, verify_views=False)
@@ -476,20 +365,13 @@ def refresh_views(con: duckdb.DuckDBPyConnection) -> None:
 
 
 def table_row_counts(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
-    """
-    仅统计 factor 模块 TABLES（含共享基础表）。
-
-    表不存在记 -1；视图与用户自建表不参与。
-    PERF: count(*) 对 fact_factor_daily 是全表扫描，CLI 展示用；
-          大库如需秒级估算，应另走 duckdb_tables().estimated_size。
-    """
+    """仅统计 factor 模块 TABLES（含共享基础表）；表不存在记 -1。"""
     existing = _main_tables(con)
     out: dict[str, int] = {}
     for table in TABLES:
         if table.name not in existing:
             out[table.name] = -1
             continue
-        # SECURITY: table.name 来自模块常量
         out[table.name] = int(_scalar(con, f'SELECT count(*) FROM "{table.name}"'))
     return out
 
@@ -500,7 +382,7 @@ def table_row_counts(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="init_factor_db.py",
-        description="factor DuckDB 组件结构初始化",
+        description="factor DuckDB 组件结构初始化（market.duckdb）",
     )
     parser.add_argument(
         "command",

@@ -4,8 +4,9 @@
 
 - **Schema 版本**：`1.0.0`
 - **组件名**：`factor`
-- **库文件**：与 `warehouse` 同库，默认来自 `src.data_pipeline.config.DUCKDB_PATH`，回退 `data/market.duckdb`
-- **依赖**：`init_market_db` 必须先执行，且 warehouse 版本 `>= 1.1.0`
+- **库文件**：与 `warehouse` 同库；路径来自 `data_pipeline.config.DUCKDB_PATH`，推荐 `${MARKET_DB_PATH}`
+- **DDL 来源**：`quant_schema.market_ddl.FACTOR_TABLES / FACTOR_STATIC_VIEWS`
+- **依赖**：`init_market_db` 必须先执行，且 warehouse 版本 `>= 1.1.0`（当前 1.2.0）
 - **资源**：沿用 `threads=6`、`memory_limit="6GB"`
 
 > `FACTOR_DB_PATH` 已废弃。factor 与 warehouse 必须同库，`v_factor_valid` 才能直接 JOIN。
@@ -30,13 +31,13 @@
 ### 1.2 CLI
 
 ```bash
-python scripts/init_market_db.py init    --db data/market.duckdb
-python scripts/init_factor_db.py init    --db data/market.duckdb
-python scripts/init_factor_db.py check   --db data/market.duckdb
-python scripts/init_factor_db.py refresh --db data/market.duckdb
+python scripts/init_market_db.py init    --db "${MARKET_DB_PATH}"
+python scripts/init_factor_db.py init    --db "${MARKET_DB_PATH}"
+python scripts/init_factor_db.py check   --db "${MARKET_DB_PATH}"
+python scripts/init_factor_db.py refresh --db "${MARKET_DB_PATH}"
 
 python scripts/init_factor_db.py init \
-  --db data/market.duckdb \
+  --db "${MARKET_DB_PATH}" \
   --threads 6 \
   --memory-limit 6GB \
   --temp-dir /tmp/duck_spill \
@@ -68,15 +69,15 @@ python scripts/init_factor_db.py init \
 import init_market_db as market
 import init_factor_db as factor
 
-with market.database("data/market.duckdb") as con:
+with market.database("${MARKET_DB_PATH}") as con:
     market.init_schema(con)                            # 必须先执行
     factor.init_schema(con)                            # 追加 factor 组件
     print(factor.installed_version(con))               # "1.0.0"
-    print(factor.installed_version(con, "warehouse"))  # "1.1.0"
+    print(factor.installed_version(con, "warehouse"))  # "1.2.0"
     print(factor.table_row_counts(con))
 
 # 因子目录变更后重建宽表视图
-with factor.database("data/market.duckdb") as con:
+with factor.database("${MARKET_DB_PATH}") as con:
     factor.refresh_views(con)
 ```
 
@@ -131,13 +132,15 @@ with factor.database("data/market.duckdb") as con:
 | 1 | `meta_schema_version` | 表 | `component` | 共享；factor 写一行 |
 | 2 | `meta_ingest_log` | 表 | `(table_name, scope_key)` | 共享；批次日志 |
 | 3 | `meta_factor_registry` | 表 | `factor_id` | 因子目录 |
-| 4 | `fact_factor_daily` | 表 | 无 | 因子值长表（主存储） |
-| 5 | `fact_tradable_flag` | 表 | 无 | 日频可交易性标志（派生） |
-| 6 | `fact_factor_quality` | 表 | 无 | 批次质量快照（可重建） |
+| 4 | `fact_factor_daily` | 表 | `(ts_code, trade_date, factor_id)` | 因子值长表（主存储） |
+| 5 | `fact_tradable_flag` | 表 | `(ts_code, trade_date)` | 日频可交易性标志（派生） |
+| 6 | `fact_factor_quality` | 表 | `(factor_id, trade_date)` | 批次质量快照（可重建） |
 | 7 | `v_factor_wide` | 视图 | — | 动态 PIVOT 宽表 |
 | 8 | `v_factor_valid` | 视图 | — | 带可交易性过滤 |
 
-业务表不建主键：DuckDB 的 ART 索引会显著拖慢批量写入；幂等性由 `meta_ingest_log` 批次 + 区间 DELETE 保证。
+自 v1.2.0 起，所有业务表都显式声明主键。ART 索引会增加写入成本，但换来
+“重复摄入/重复计算不可能产生重复行”，避免窗口函数静默错算；因子写入仍建议
+按 `(factor_id, trade_date)` 区间 `DELETE + INSERT` 做整段替换。
 
 ### 2.2 `meta_factor_registry` — 因子目录
 
@@ -170,7 +173,10 @@ with factor.database("data/market.duckdb") as con:
 | `is_stale` | `BOOLEAN` | `NOT NULL DEFAULT FALSE` | 是否 forward-fill |
 | `source_batch_id` | `BIGINT` | 可空 | 关联 `meta_ingest_log` 批次 |
 
-不建主键。幂等写入按 `(factor_id, trade_date 区间)` 先 `DELETE` 再 `INSERT`。
+约束：`PRIMARY KEY (ts_code, trade_date, factor_id)`。
+
+幂等写入建议：按 `(factor_id, trade_date 区间)` 先 `DELETE` 再 `INSERT`。
+主键本身也能保证唯一，但区间替换语义更清晰，也能清掉本批次已不存在的成分。
 
 `value` 与 `is_stale` 拆开的原因：停牌期间不应静默填充。若业务需要 forward-fill，填充值标 `is_stale = TRUE`，回测可用 `v_factor_valid` 过滤，避免虚假信号进入组合。
 
@@ -189,6 +195,8 @@ with factor.database("data/market.duckdb") as con:
 | `is_buyable` | `BOOLEAN` | `NOT NULL` |
 | `is_sellable` | `BOOLEAN` | `NOT NULL` |
 | `in_universe` | `BOOLEAN` | `NOT NULL` |
+
+**主键**：`(ts_code, trade_date)`。
 
 派生 SQL（由因子管道执行，不由 init 模块执行）：
 
@@ -217,7 +225,8 @@ is_sellable    = NOT is_suspended AND NOT is_limit_down AND in_universe
 | `coverage` | `DOUBLE` | `NOT NULL` |
 | `computed_at` | `TIMESTAMPTZ` | `NOT NULL DEFAULT now()` |
 
-`coverage = n_valid / n_total`。建议闸门：`coverage < 0.8` 或 `n_outlier` 突增时告警。该表可随因子区间一起重建，不参与主键。
+`coverage = n_valid / n_total`。建议闸门：`coverage < 0.8` 或 `n_outlier` 突增时告警。
+**主键**：`(factor_id, trade_date)`；同一批次重跑会覆盖质量行，不追加。
 
 ### 2.6 `v_factor_wide` — 动态 PIVOT 宽表
 
@@ -295,7 +304,7 @@ factor 层只读 warehouse 的表，只写自己的 `meta_factor_*` / `fact_fact
 ```sql
 SELECT component, version FROM meta_schema_version ORDER BY component;
 -- factor    1.0.0
--- warehouse 1.1.0
+-- warehouse 1.2.0
 ```
 
 | 调用 | 默认 component | 说明 |
@@ -344,7 +353,10 @@ amount_yuan = amount * 1000
 
 ### 4.3 上游去重
 
-`fact_daily` / `fact_adj_factor` / `fact_daily_basic` / `fact_stk_limit` 均无主键，重复摄入会留下重复 `(ts_code, trade_date)`；窗口函数（`LAG` / `AVG OVER`）遇到重复行会**静默错算**。
+自 warehouse v1.2.0 起，`fact_daily` / `fact_adj_factor` / `fact_daily_basic` /
+`fact_stk_limit` 都有 `(ts_code, trade_date)` 主键，重复摄入会走 upsert 覆盖，
+不会留下重复行。旧库（v1.1.0 及以前）没有主键，升级前必须先迁移/重建；
+从外部 CSV/Parquet 导入时仍应在入库前去重。
 
 管道强制步骤：
 
@@ -493,7 +505,7 @@ ON CONFLICT (component) DO UPDATE SET
 因子目录变更后：
 
 ```bash
-python scripts/init_factor_db.py refresh --db data/market.duckdb
+python scripts/init_factor_db.py refresh --db "${MARKET_DB_PATH}"
 ```
 
 ---
@@ -522,10 +534,10 @@ pytest -q scripts/test_init_market_db.py scripts/test_init_factor_db.py
 ### 8.1 冒烟
 
 ```bash
-python scripts/init_market_db.py init    --db data/market.duckdb
-python scripts/init_factor_db.py init    --db data/market.duckdb
-python scripts/init_factor_db.py check   --db data/market.duckdb
-python scripts/init_factor_db.py refresh --db data/market.duckdb
+python scripts/init_market_db.py init    --db "${MARKET_DB_PATH}"
+python scripts/init_factor_db.py init    --db "${MARKET_DB_PATH}"
+python scripts/init_factor_db.py check   --db "${MARKET_DB_PATH}"
+python scripts/init_factor_db.py refresh --db "${MARKET_DB_PATH}"
 ```
 
 ### 8.2 SQL 验证
@@ -533,7 +545,7 @@ python scripts/init_factor_db.py refresh --db data/market.duckdb
 ```sql
 SELECT component, version FROM meta_schema_version ORDER BY component;
 -- factor    1.0.0
--- warehouse 1.1.0
+-- warehouse 1.2.0
 
 DESCRIBE v_factor_wide;
 DESCRIBE v_factor_valid;
@@ -632,7 +644,7 @@ WHERE trade_date >= DATE '2024-01-01' AND trade_date < DATE '2025-01-01';
 3. **同库单写者**：所有 factor 批次写入串行。阈值：单库 P95 写入等待 > 5 分钟，或文件 > 50 GB，就拆独立 `factor.duckdb` + `ATTACH`。
 4. **`table_row_counts` 精确计数**：2.5 亿行/年时是全表扫描。状态展示可改 `duckdb_tables().estimated_size`，但 API 语义要从「精确」改成「估算」，需显式改名。
 5. **ST 日频快照缺失**：`is_st` 只能置 `FALSE`。要真正复现 ST 剔除类因子，必须在 warehouse 新增 `fact_stock_status`，这是比 factor schema 更上游的缺口。
-6. **上游去重是最大正确性风险**：无主键 + 重跑批次会留下重复行，窗口函数静默错算。短期靠管道 SQL + quality 告警，长期应在摄入端约束。
+6. **上游去重**：v1.2.0 起主键已能防止重复行；仍需保留入库前去重，处理旧库迁移与外部文件导入。
 7. **DuckDB 不是多写者数据库**：未来多团队并发写因子时，迁 ClickHouse / PostgreSQL / 专用特征库；DuckDB 保留为研究快照与 Parquet 归档格式。
 
 **若假设不成立需如何调整**：若 DuckDB 版本不支持 `PIVOT ... USING FIRST` 或视图内 `ORDER BY`，会自动走条件聚合回退（已实现，测试覆盖 `test_wide_view_refresh_reflects_active_factors`），无需改代码；若必须独立 `factor.duckdb`，则 `v_factor_valid` 需改为跨库 `ATTACH` 引用，`_require_warehouse` 也要改成检查 ATTACH 别名而非同库表名——这一改动会连带影响 `verify_schema` 与全部测试夹具，属于独立方案，建议单开一版。

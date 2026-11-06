@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """init_factor_db.py 的 pytest 用例。
 
 运行：
@@ -8,13 +7,12 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
-
-import pytest
 
 import init_factor_db as factor
 import init_market_db as market
+import pytest
 
 
 def _table_names(con) -> set[str]:
@@ -71,12 +69,11 @@ def test_init_is_idempotent_and_versions_isolated(market_db: Path) -> None:
 
     with factor.database(market_db, read_only=True) as con:
         assert factor.installed_version(con) == "1.0.0"
-        assert factor.installed_version(con, "warehouse") == "1.1.0"
+        assert factor.installed_version(con, "warehouse") == "1.2.0"
         assert (
             factor._scalar(
                 con,
-                "SELECT count(*) FROM meta_schema_version "
-                "WHERE component = 'factor'",
+                "SELECT count(*) FROM meta_schema_version WHERE component = 'factor'",
             )
             == 1
         )
@@ -102,9 +99,9 @@ def test_market_init_after_factor_keeps_both_versions(market_db: Path) -> None:
     with factor.database(market_db) as con:
         factor.init_schema(con)
         market.init_schema(con)
-        assert market.installed_version(con) == "1.1.0"
+        assert market.installed_version(con) == "1.2.0"
         assert factor.installed_version(con) == "1.0.0"
-        assert factor.installed_version(con, "warehouse") == "1.1.0"
+        assert factor.installed_version(con, "warehouse") == "1.2.0"
 
 
 # ---------------------------------------------------------------------------
@@ -112,9 +109,11 @@ def test_market_init_after_factor_keeps_both_versions(market_db: Path) -> None:
 # ---------------------------------------------------------------------------
 def test_init_requires_warehouse(tmp_path: Path) -> None:
     db = tmp_path / "empty.duckdb"
-    with factor.database(db) as con:
-        with pytest.raises(factor.SchemaError, match="warehouse"):
-            factor.init_schema(con)
+    with (
+        factor.database(db) as con,
+        pytest.raises(factor.SchemaError, match="warehouse"),
+    ):
+        factor.init_schema(con)
 
 
 def test_warehouse_version_too_old(factor_db: Path) -> None:
@@ -128,9 +127,8 @@ def test_warehouse_version_too_old(factor_db: Path) -> None:
 
 
 def test_component_validation(factor_db: Path) -> None:
-    with factor.database(factor_db) as con:
-        with pytest.raises(factor.ConfigError):
-            factor.installed_version(con, "Bad-Name")
+    with factor.database(factor_db) as con, pytest.raises(factor.ConfigError):
+        factor.installed_version(con, "Bad-Name")
 
 
 # ---------------------------------------------------------------------------
@@ -337,14 +335,14 @@ def test_read_only_readers_coexist(factor_db: Path) -> None:
 
 
 def test_same_process_rw_connections_share_instance(factor_db: Path) -> None:
-    with factor.database(factor_db) as con:
-        with factor.database(factor_db) as con2:
-            assert factor.installed_version(con2) == "1.0.0"
+    with factor.database(factor_db), factor.database(factor_db) as con2:
+        assert factor.installed_version(con2) == "1.0.0"
 
 
 def test_bulk_insert_10k_rows(factor_db: Path) -> None:
     rows = [
-        ("000001.SZ", date(2024, 1, 2), 1, float(i), False, None) for i in range(10_000)
+        ("000001.SZ", date(2024, 1, 2) + timedelta(days=i), 1, float(i), False, None)
+        for i in range(10_000)
     ]
     with factor.database(factor_db) as con:
         con.execute(

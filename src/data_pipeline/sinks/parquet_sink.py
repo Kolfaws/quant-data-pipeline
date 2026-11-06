@@ -1,5 +1,6 @@
-import polars as pl
 from pathlib import Path
+
+import polars as pl
 
 
 def save_to_parquet(df: pl.DataFrame, filepath: str):

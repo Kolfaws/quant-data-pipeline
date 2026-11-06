@@ -1,192 +1,195 @@
 # Quant Data Pipeline
 
-一个模块化的量化数据管道，负责数据源拉取（Fetch）、数据清洗（Clean）、增量更新（Update）以及底层数据库结构初始化（Init）。
+统一数据底座的**唯一写入方**：负责 `market.duckdb`（路径由 `${MARKET_DB_PATH}` 指定）的建表、行情摄入与因子层结构。
 
-**目前仅支持 Daily 数据，默认数据源 = Tushare。**
-
-> **开发状态**：`core/`、`processors/`、`sources/`、`sinks/` 仍为占位模块；数据库初始化（`scripts/init_*.py`）已可用，管道 CLI 尚在建设中。
-
-## 1. 架构总览
-
-本项目按职责分为几个核心模块，数据层采用单库多组件架构：`warehouse` 与 `factor` 共用同一个 DuckDB 文件。
-
-- **Warehouse 组件（基础库）**：基于 DuckDB 初始化基础行情结构、建表、建视图（`scripts/init_market_db.py`）。该组件作为单一数据源，结构保持稳定。
-- **Factor 组件（因子层）**：factor 组件追加在同一个 DuckDB 文件中（`scripts/init_factor_db.py`），通过 `meta_schema_version` 里 `component = 'factor'` 的版本行与 warehouse 隔离。因子表与宽表视图可以直接 JOIN 行情表，无需跨库 `ATTACH`。
-- **Fetch**：从外部数据源（如 Tushare 等）拉取原始数据（`src/data_pipeline/core/source.py`）。
-- **Clean**：对原始数据进行清洗、去重、格式转换（`src/data_pipeline/processors/cleaner.py`）。
-- **Update**：增量更新历史数据到 DuckDB（`src/data_pipeline/cli.py` 调度）。
-- **Sink**：负责将处理好的数据写入数据库（`src/data_pipeline/core/sink.py`）。
-
-> **单库原因**：DuckDB 的写锁以文件为单位，拆成两个文件并不能解决单写者冲突，反而会让 `v_factor_valid` 必须跨库 `ATTACH`。拆库阈值与迁移方案见 [docs/init_factor_db.md](docs/init_factor_db.md) 第 12 节。
-
-## 2. 快速开始
-
-### 2.1 环境准备
-
-```bash
-# 推荐：uv（由 pyproject.toml / .python-version 管理）
-uv sync --extra dev
-# 或
-make install
-
-# 也可以在已激活的虚拟环境中可编辑安装
-pip install -e ".[dev]"
-
-# 或安装完整环境快照（包含研究/回测依赖，体积较大）
-pip install -r requirements.txt
+```text
+market.duckdb
+├── warehouse 组件（component='warehouse'，v1.2.0）  基础行情
+└── factor    组件（component='factor'，v1.0.0）     因子层
 ```
 
-要求 Python >= 3.10。
+> **表结构不在本仓库硬编码**：DDL 来自 `quant_schema.market_ddl`；
+> 本项目的 `init_market_db.py` / `init_factor_db.py` 只负责事务、校验与版本行。
 
-### 2.2 配置环境变量
+## 1. 职责边界
 
-复制 `.env.example` 为 `.env`，填入数据源 Token 与数据库路径：
+| 项目 | 负责的库/表 | 权限 |
+| --- | --- | --- |
+| **quant-data-pipeline** | `market.duckdb`：warehouse + factor 表结构；写入基础行情 | RW |
+| quant-baseline | 只读 `market.duckdb`；写 `backtest.duckdb` 的基准表 | market RO |
+| quant-backtest-engine | 建 `backtest.duckdb`；写净值 | market RO |
+| factor-research | 写 `market.duckdb` 的 factor 组件 | market RW |
 
-```env
-# 单库：warehouse 与 factor 共用同一个 DuckDB 文件
-DUCKDB_PATH=data/market.duckdb
-TUSHARE_TOKEN=your_token_here
+- **保持本项目纯净**：只碰 `market.duckdb`，不建 `backtest.duckdb` 的表。
+- **单写多读**：DuckDB 写入以文件为单位加锁；factor_research 与 backtest 同时运行时，
+  backtest 必须以 `read_only=True` 打开。
+- 因子写入采用 `DELETE + INSERT` 的增量方式，不做整库重建。
 
-# FACTOR_DB_PATH 已废弃：factor 与 warehouse 必须同库。
-```
-
-### 2.3 初始化数据库
-
-```bash
-# 1) 初始化 warehouse 组件（必须先执行）
-python scripts/init_market_db.py init --db data/market.duckdb
-
-# 2) 初始化 factor 组件（会检查 warehouse 版本 >= 1.1.0）
-python scripts/init_factor_db.py init --db data/market.duckdb
-
-# 3) 校验结构；因子目录变更后刷新宽表视图
-python scripts/init_factor_db.py check   --db data/market.duckdb
-python scripts/init_factor_db.py refresh --db data/market.duckdb
-```
-
-两个脚本必须指向同一个库文件，并按 `warehouse → factor` 的顺序执行。DuckDB 是跨进程单写者，初始化期间不要并发写入。
-
-等价的 Makefile 命令：
-
-```bash
-make init          # warehouse
-make init-factor   # factor
-make check         # warehouse 结构校验
-make check-factor  # factor 结构 + 视图校验
-make refresh       # 按当前活跃因子重建 v_factor_wide
-```
-
-> 表结构与实现约定详见：
->
-> - [Warehouse 组件初始化文档](docs/init_market_db.md)
-> - [Factor 组件初始化文档](docs/init_factor_db.md)
-
-### 2.4 运行数据管道
-
-```bash
-# 说明：cli.py 当前为占位，以下为规划中的模块接口
-python -m data_pipeline.cli fetch  --date 20240101
-python -m data_pipeline.cli clean  --date 20240101
-python -m data_pipeline.cli update --date 20240101
-
-# 安装后也可使用 console script
-quant-data-pipeline fetch --date 20240101
-```
-
-## 3. 目录结构
+## 2. 目录结构
 
 ```text
 quant-data-pipeline/
-├── data/                       # 本地数据目录（实际数据文件被 .gitignore 忽略）
-│   ├── raw/                    # 原始数据（JSON / CSV 等）
-│   ├── processed/              # 清洗后的中间数据
-│   └── market.duckdb           # 单库文件：warehouse + factor 两组件共用（init 后生成）
-├── docs/                       # 详细设计文档
-│   ├── init_market_db.md       # warehouse 组件：表结构、API、版本记录
-│   └── init_factor_db.md       # factor 组件：表结构、宽表视图、复杂度与权衡
-├── scripts/                    # 可独立执行的脚本（不依赖包安装）
-│   ├── init_market_db.py       # warehouse 组件建表 / 建视图 / 校验
-│   ├── init_factor_db.py       # factor 组件建表 / 建视图 / 校验 / refresh
-│   ├── test_init_market_db.py  # warehouse 组件测试
-│   └── test_init_factor_db.py  # factor 组件与跨组件测试
-├── src/data_pipeline/          # 管道 Python 包（src 布局）
-│   ├── core/                   # 核心抽象：Source / Sink 基类（占位）
-│   ├── processors/             # 数据清洗逻辑：cleaner（占位）
-│   ├── sources/                # 具体数据源实现：tushare（占位）
-│   ├── sinks/                  # 具体落库实现：duckdb_sink / parquet_sink
-│   ├── cli.py                  # 管道命令行入口（占位）
-│   ├── config.py               # 全局配置：读取 .env
-│   └── logger.py               # loguru 日志配置
-├── tests/                      # 包级单元测试目录
-├── .env.example                # 环境变量模板（复制为 .env）
-├── .gitattributes              # 换行符与二进制文件规则
-├── .gitignore                  # Git 忽略规则
-├── .pre-commit-config.yaml     # pre-commit 钩子（ruff / codespell 等）
-├── .python-version             # Python 版本（3.10）
-├── Makefile                    # 常用开发、测试与数据库初始化命令
-├── pyproject.toml              # 项目元数据、依赖、ruff / pytest 配置
-├── requirements.txt            # 完整环境依赖快照（pip freeze）
-└── README.md                   # 本文件
+├── data/                       # 本地中转目录（可选）
+├── docs/
+│   ├── init_market_db.md       # warehouse 表结构、版本、API
+│   ├── init_factor_db.md       # factor 表结构、宽表视图
+│   └── ingest_market_data.md   # Tushare 摄入与降级策略
+├── scripts/
+│   ├── init_market_db.py       # warehouse 建表/校验（DDL 来自 quant_schema）
+│   ├── init_factor_db.py       # factor 建表/视图/refresh
+│   ├── ingest_market_data.py   # Tushare -> market.duckdb（幂等）
+│   ├── seed_index_demo.py      # 无 index_daily 权限时的演示补数
+│   ├── test_init_market_db.py
+│   └── test_init_factor_db.py
+├── src/data_pipeline/
+│   ├── config.py               # .env 读取（无 dotenv 依赖）
+│   ├── db.py                   # 统一 DuckDB 连接器（被其他项目复用）
+│   ├── logger.py
+│   ├── core/errors.py
+│   └── sources/tushare_src.py  # Tushare -> polars
+├── Makefile
+├── pyproject.toml
+└── README.md
 ```
 
-## 4. 各模块说明
-
-### 4.1 Warehouse 组件初始化 (`init_market_db`)
-
-负责 `warehouse` 组件的建表、建视图、记录版本号。幂等且严格校验结构（缺表、缺列、类型不符、多余列都会失败），作为整个系统唯一的基础数据来源。详见 [docs/init_market_db.md](docs/init_market_db.md)。
-
-### 4.2 因子组件初始化 (`init_factor_db`)
-
-在同一个 DuckDB 文件中追加 factor 表、视图与 `component = 'factor'` 版本行。必须先完成 `init_market_db`（warehouse 版本 >= `1.1.0`），否则在建表前直接 `SchemaError` 失败；因子目录（`meta_factor_registry`）变更后必须执行 `refresh` 重建 `v_factor_wide`，否则宽表列不会更新。详见 [docs/init_factor_db.md](docs/init_factor_db.md)。
-
-### 4.3 数据拉取 (`fetch`)
-
-负责从数据源按指定日期或范围拉取原始数据存入 `data/raw` 或直接流转。
-
-### 4.4 数据清洗 (`clean`)
-
-负责处理空值、类型转换、去重等。
-
-### 4.5 数据更新 (`update`)
-
-负责将清洗后的数据写入 DuckDB，包含增量逻辑与幂等写入（如 `ON CONFLICT`）。
-
-## 5. 开发与测试
+## 3. 安装
 
 ```bash
-# 安装 / 同步依赖
-make install
-
-# 运行全部测试（tests/ 与 scripts/）
-make test
-# 只跑数据库初始化相关测试
-make test-market
-make test-factor
-
-# 代码检查与格式化
-make lint
-make format
-
-# 查看全部命令
-make help
+# 只装必要的库
+uv add --editable ../quant-db-schema
+uv add duckdb polars pyarrow pytz tushare
+uv sync
 ```
 
-> 默认通过 `uv run` 执行。若使用已激活的 conda / venv 环境而非 uv，可清空运行器：
->
-> ```bash
-> make RUN= test
-> make RUN= init
-> ```
->
-> 或直接调用 `python scripts/init_market_db.py ...` / `pytest ...`。
+> `quant-db-schema` 的 Python 包名是 `quant_schema`（代码里 `from quant_schema...`）。
+> `pyarrow` 是 DuckDB `register(polars_df)` 的运行时依赖；`pytz` 用于读取
+> `TIMESTAMPTZ` 列。两者都不能省。
+
+本项目采用 `src/` 布局，`uv sync` 会以 editable 方式安装 `data_pipeline`；
+测试路径由 `pyproject.toml` 的 `pythonpath = ["src", "scripts"]` 提供，
+脚本和测试中不再使用 `sys.path.insert`。
+
+要求 Python >= 3.13。
+
+> 当前可用入口是 `scripts/init_market_db.py`、`scripts/init_factor_db.py`、
+> `scripts/ingest_market_data.py`。`src/data_pipeline/cli.py` 与通用
+> Source/Cleaner/Sink 骨架仍待完善；日常数据接入请直接用上面的脚本。
+
+## 4. 配置
+
+复制 `.env.example` 为 `.env`：
+
+```env
+TUSHARE_TOKEN=
+DUCKDB_PATH=/absolute/path/to/market.duckdb
+LOG_LEVEL=INFO
+```
+
+- 真实环境变量优先于 `.env`；`.env` 已被 gitignore，禁止提交。
+- `.env` 由 `src/data_pipeline/config.py` 直接解析，不依赖 `python-dotenv`。
+- 代码中不写死任何绝对路径或 Token。
+
+## 5. 初始化
+
+```bash
+# 1) warehouse（必须先执行）
+uv run python scripts/init_market_db.py init
+
+# 2) factor（会检查 warehouse 版本 >= 1.1.0）
+uv run python scripts/init_factor_db.py init
+
+# 3) 校验；因子目录变更后刷新宽表视图
+uv run python scripts/init_factor_db.py check
+uv run python scripts/init_factor_db.py refresh
+```
+
+两个脚本必须指向同一个库文件，并按 `warehouse → factor` 顺序执行。
+初始化期间不要并发写入（DuckDB 跨进程单写者）。
+
+## 6. 摄入行情
+
+```bash
+# 默认：交易日历 + 股票列表 + 20 只样本股（日线/复权/核心票 daily_basic）+ 3 个指数
+uv run python scripts/ingest_market_data.py \
+    --db "${MARKET_DB_PATH}" \
+    --start 2015-01-01 --end 2026-11-06
+
+# 只补指定股票
+uv run python scripts/ingest_market_data.py --stocks 600519.SH,000858.SZ
+
+# 额外抓指数成分权重（需要 Tushare index_weight 权限）
+uv run python scripts/ingest_market_data.py --with-index-weight
+
+# 没有 index_daily 权限时，可用公开 K 线补指数（仅演示/应急）
+uv run python scripts/seed_index_demo.py
+```
+
+写入策略：
+
+- 每张表 `INSERT ... ON CONFLICT (主键) DO UPDATE`，重复执行行数不膨胀；
+- 每张表的批次写入结果记入 `meta_ingest_log`；
+- 限频/权限错误会记录 warning 并跳过，不阻断其他标的；
+- 交易日历接口不可用时，自动从 `fact_daily` 的交易日反推 `dim_trade_cal`。
+
+详细说明见 [docs/ingest_market_data.md](docs/ingest_market_data.md)。
+
+## 7. 表结构
+
+warehouse（11 张表 + 2 视图）：
+
+| 表 | 主键 | 说明 |
+| --- | --- | --- |
+| `meta_schema_version` | `component` | warehouse / factor 各一行 |
+| `meta_ingest_log` | `(table_name, scope_key)` | 摄入批次 |
+| `dim_stock_basic` | `ts_code` | 股票基础信息 |
+| `dim_trade_cal` | `(exchange, cal_date)` | 交易日历 |
+| `fact_daily` | `(ts_code, trade_date)` | 个股日线 |
+| `fact_adj_factor` | `(ts_code, trade_date)` | 复权因子 |
+| `fact_daily_basic` | `(ts_code, trade_date)` | 市值/换手/估值 |
+| `fact_stk_limit` | `(ts_code, trade_date)` | 涨跌停价 |
+| `fact_index_daily` | `(index_code, trade_date)` | 指数日线（v1.2.0 新增） |
+| `fact_index_weight` | `(index_code, trade_date, con_code)` | 指数成分权重（v1.2.0 新增） |
+| `fact_fund_daily` | `(ts_code, trade_date)` | ETF/基金日线（v1.2.0 新增） |
+
+视图：`v_daily_qfq`、`v_daily_hfq`。
+
+factor（4 张表 + 2 视图）：
+
+| 表 | 主键 |
+| --- | --- |
+| `meta_factor_registry` | `factor_id` |
+| `fact_factor_daily` | `(ts_code, trade_date, factor_id)` |
+| `fact_tradable_flag` | `(ts_code, trade_date)` |
+| `fact_factor_quality` | `(factor_id, trade_date)` |
+
+视图：`v_factor_valid`、`v_factor_wide`（列由活跃因子动态生成）。
+
+字段级说明：
+
+- [docs/init_market_db.md](docs/init_market_db.md)
+- [docs/init_factor_db.md](docs/init_factor_db.md)
+
+## 8. 开发与测试
+
+```bash
+make install
+make test          # scripts/ 下的 pytest
+make lint
+make format
+```
 
 直接使用 pytest：
 
 ```bash
-pytest -q scripts/test_init_market_db.py scripts/test_init_factor_db.py
+uv run --with pytest pytest scripts/test_init_market_db.py scripts/test_init_factor_db.py -q
 ```
 
-> Windows 下 POSIX 文件权限相关用例会自动跳过，其余用例应全绿。
+Windows 下 POSIX 权限相关用例会自动跳过。
 
----
-END OF FILE
+## 9. 版本历史
+
+| 版本 | 变更 |
+| --- | --- |
+| `1.1.0` | warehouse 初始结构（8 表 + 2 视图） |
+| `1.2.0` | 新增 `fact_index_daily` / `fact_index_weight` / `fact_fund_daily`；为存量表补主键 |
+| factor `1.0.0` | 因子目录/因子值/可交易标记/质量统计 + 宽表视图 |

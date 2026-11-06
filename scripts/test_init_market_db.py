@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """init_market_db.py 的 pytest 用例  运行：pytest -q test_init_market_db.py"""
 
 from __future__ import annotations
@@ -11,9 +10,8 @@ from pathlib import Path
 from typing import Final
 
 import duckdb
-import pytest
-
 import init_market_db as mod
+import pytest
 
 POSIX_ONLY = pytest.mark.skipif(os.name != "posix", reason="POSIX 文件权限语义")
 
@@ -21,7 +19,7 @@ POSIX_ONLY = pytest.mark.skipif(os.name != "posix", reason="POSIX 文件权限�
 # ---------------------------------------------------------------------------
 # 测试辅助
 # ---------------------------------------------------------------------------
-_SIZE_RE: Final = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([KMGT]?i?B)\s*$", re.I)
+_SIZE_RE: Final = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([KMGT]?i?B)\s*$", re.IGNORECASE)
 _SIZE_MULT: Final[dict[str, int]] = {
     "B": 1,
     "KB": 1024,
@@ -359,9 +357,8 @@ def test_installed_version_none_when_row_absent(tmp_path: Path) -> None:
 
 def test_installed_version_before_init_raises(tmp_path: Path) -> None:
     """未 init 时 meta_schema_version 不存在 → fail-fast 上抛，不返回 None"""
-    with mod.database(tmp_path / "m.duckdb") as con:
-        with pytest.raises(duckdb.Error):
-            mod.installed_version(con)
+    with mod.database(tmp_path / "m.duckdb") as con, pytest.raises(duckdb.Error):
+        mod.installed_version(con)
 
 
 # ---------------------------------------------------------------------------
