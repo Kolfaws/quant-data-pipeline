@@ -68,7 +68,7 @@ def test_init_is_idempotent_and_versions_isolated(market_db: Path) -> None:
             factor.init_schema(con)
 
     with factor.database(market_db, read_only=True) as con:
-        assert factor.installed_version(con) == "1.0.0"
+        assert factor.installed_version(con) == "1.1.0"
         assert factor.installed_version(con, "warehouse") == "1.2.0"
         assert (
             factor._scalar(
@@ -100,7 +100,7 @@ def test_market_init_after_factor_keeps_both_versions(market_db: Path) -> None:
         factor.init_schema(con)
         market.init_schema(con)
         assert market.installed_version(con) == "1.2.0"
-        assert factor.installed_version(con) == "1.0.0"
+        assert factor.installed_version(con) == "1.1.0"
         assert factor.installed_version(con, "warehouse") == "1.2.0"
 
 
@@ -330,13 +330,13 @@ def test_read_only_readers_coexist(factor_db: Path) -> None:
         factor.database(factor_db, read_only=True) as a,
         factor.database(factor_db, read_only=True) as b,
     ):
-        assert factor.installed_version(a) == "1.0.0"
-        assert factor.installed_version(b) == "1.0.0"
+        assert factor.installed_version(a) == "1.1.0"
+        assert factor.installed_version(b) == "1.1.0"
 
 
 def test_same_process_rw_connections_share_instance(factor_db: Path) -> None:
     with factor.database(factor_db), factor.database(factor_db) as con2:
-        assert factor.installed_version(con2) == "1.0.0"
+        assert factor.installed_version(con2) == "1.1.0"
 
 
 def test_bulk_insert_10k_rows(factor_db: Path) -> None:

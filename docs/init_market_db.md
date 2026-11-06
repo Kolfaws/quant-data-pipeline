@@ -46,6 +46,7 @@ python init_market_db.py init \
 | --- | --- | --- |
 | `command` | `init` | `init` / `check` |
 | `--db` | config 的 `DUCKDB_PATH` | 文件路径或 `:memory:` |
+| `--env` | `prod` | `prod` / `test`；未传 `--db` 时按环境选择路径 |
 | `--threads` | `6` | `int`，`[1, 128]`，拒绝 `bool` |
 | `--memory-limit` | `6GB` | 匹配 `^\d+(\.\d+)?(?:MB | GB | TB)$`（不允许中间空格） |
 | `--temp-dir` | 无 | 目录会被 `mkdir(mode=0700)` |
@@ -147,7 +148,7 @@ finally:
 | 字段 | 类型 | 约束 | 说明 |
 | --- | --- | --- | --- |
 | `component` | `VARCHAR` | `NOT NULL` | 组件名；warehouse 固定 `'warehouse'`，factor 组件为 `'factor'` |
-| `version` | `VARCHAR` | `NOT NULL` | schema 版本号，warehouse 当前 `1.2.0`，factor 为 `1.0.0` |
+| `version` | `VARCHAR` | `NOT NULL` | schema 版本号，warehouse 当前 `1.2.0`，factor 为 `1.1.0` |
 | `applied_at` | `TIMESTAMPTZ` | `NOT NULL DEFAULT current_timestamp` | 版本生效时间 |
 
 约束：`PRIMARY KEY (component)`

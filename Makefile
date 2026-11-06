@@ -21,7 +21,7 @@ INDEXES ?=
 DAILY_BASIC ?= core
 
 .PHONY: help install install-pip hooks lint format test test-market test-factor \
-        init init-factor check check-factor refresh ingest seed-index clean
+        init init-factor check check-factor refresh init-test sync-test ingest seed-index clean
 
 help:
 	@echo "Quant Data Pipeline"
@@ -36,6 +36,8 @@ help:
 	@echo "  check          校验 warehouse"
 	@echo "  check-factor   校验 factor 表 + 视图"
 	@echo "  refresh        按活跃因子重建 v_factor_wide"
+	@echo "  init-test      初始化测试库 market_test.duckdb"
+	@echo "  sync-test      正式行情 -> 测试库"
 	@echo ""
 	@echo "  ingest         Tushare -> market.duckdb（幂等）"
 	@echo "  seed-index     无 index_daily 权限时的演示指数补数"
@@ -59,7 +61,7 @@ format:
 	$(RUFF) format .
 
 test:
-	$(PYTEST) scripts -q
+	$(PYTEST) -q
 
 test-market:
 	$(PYTEST) scripts/test_init_market_db.py -q
@@ -81,6 +83,12 @@ check-factor:
 
 refresh:
 	$(PYTHON) scripts/init_factor_db.py refresh $(if $(DB),--db "$(DB)",)
+
+init-test:
+	$(PYTHON) scripts/init_test_dbs.py
+
+sync-test:
+	$(PYTHON) scripts/sync_test_market.py --apply
 
 ingest:
 	$(PYTHON) scripts/ingest_market_data.py $(if $(DB),--db "$(DB)",) --start $(START) --end $(END) \

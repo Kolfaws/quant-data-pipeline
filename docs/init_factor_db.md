@@ -2,7 +2,7 @@
 
 在已有 `warehouse` 组件之上追加 `factor` 组件：只建 factor 表、视图、写 factor 版本行，不重建行情表，不写入业务数据。
 
-- **Schema 版本**：`1.0.0`
+- **Schema 版本**：`1.1.0`
 - **组件名**：`factor`
 - **库文件**：与 `warehouse` 同库；路径来自 `data_pipeline.config.DUCKDB_PATH`，推荐 `${MARKET_DB_PATH}`
 - **DDL 来源**：`quant_schema.market_ddl.FACTOR_TABLES / FACTOR_STATIC_VIEWS`
@@ -48,6 +48,7 @@ python scripts/init_factor_db.py init \
 | --- | --- | --- |
 | `command` | `init` | `init` / `check` / `refresh` |
 | `--db` | config `DUCKDB_PATH` | 文件路径或 `:memory:` |
+| `--env` | `prod` | `prod` / `test`；未传 `--db` 时按环境选择路径 |
 | `--threads` | `6` | `[1,128]`，拒绝 `bool` |
 | `--memory-limit` | `6GB` | `^\d+(\.\d+)?(?:MB\|GB\|TB)$`（不允许中间空格） |
 | `--temp-dir` | 无 | 目录会被 `mkdir(mode=0700)` |
@@ -72,7 +73,7 @@ import init_factor_db as factor
 with market.database("${MARKET_DB_PATH}") as con:
     market.init_schema(con)                            # 必须先执行
     factor.init_schema(con)                            # 追加 factor 组件
-    print(factor.installed_version(con))               # "1.0.0"
+    print(factor.installed_version(con))               # "1.1.0"
     print(factor.installed_version(con, "warehouse"))  # "1.2.0"
     print(factor.table_row_counts(con))
 
@@ -123,7 +124,7 @@ with factor.database("${MARKET_DB_PATH}") as con:
 
 ## 2. Schema
 
-`SCHEMA_VERSION = "1.0.0"`，`component = "factor"`。新增 4 张表 + 2 个视图，并把 2 张共享基础表纳入严格校验。
+`SCHEMA_VERSION = "1.1.0"`，`component = "factor"`。新增 7 张表 + 2 个视图，并把 2 张共享基础表纳入严格校验。
 
 ### 2.1 Overview
 
@@ -135,8 +136,11 @@ with factor.database("${MARKET_DB_PATH}") as con:
 | 4 | `fact_factor_daily` | 表 | `(ts_code, trade_date, factor_id)` | 因子值长表（主存储） |
 | 5 | `fact_tradable_flag` | 表 | `(ts_code, trade_date)` | 日频可交易性标志（派生） |
 | 6 | `fact_factor_quality` | 表 | `(factor_id, trade_date)` | 批次质量快照（可重建） |
-| 7 | `v_factor_wide` | 视图 | — | 动态 PIVOT 宽表 |
-| 8 | `v_factor_valid` | 视图 | — | 带可交易性过滤 |
+| 7 | `meta_factor_profile` | 表 | `factor_id` | 因子域 / 频率 / 来源等元数据 |
+| 8 | `meta_factor_validation` | 表 | `(factor_id, env, validated_at)` | 上线前验证记录 |
+| 9 | `meta_factor_promotion_log` | 表 | `promotion_id` | test -> prod 发布审计 |
+| 10 | `v_factor_wide` | 视图 | — | 动态 PIVOT 宽表 |
+| 11 | `v_factor_valid` | 视图 | — | 带可交易性过滤 |
 
 自 v1.2.0 起，所有业务表都显式声明主键。ART 索引会增加写入成本，但换来
 “重复摄入/重复计算不可能产生重复行”，避免窗口函数静默错算；因子写入仍建议
@@ -265,6 +269,32 @@ WHERE t.is_buyable = TRUE OR t.is_sellable = TRUE;
 
 ---
 
+### 2.8 因子域、验证与发布
+
+新增三张元数据表，不改动原 `meta_factor_registry`：
+
+- `meta_factor_profile`：`domain`（`price_volume` / `fundamental` /
+  `capital_flow` / `macro`）、`frequency`、`unit`、`source`、`owner`、`notes`；
+- `meta_factor_validation`：`factor_id` + `env` + `status`
+  （`pending` / `approved` / `rejected`）+ `metrics_json`；
+- `meta_factor_promotion_log`：记录 test -> prod 的发布审计。
+
+测试库和正式库使用同一套 DDL。测试库初始化：
+
+```bash
+python scripts/init_test_dbs.py
+python scripts/sync_test_market.py --apply
+```
+
+研究验证通过后，由 quant-factor 的 `scripts/promote_test_factor.py` 发布：
+
+```bash
+python scripts/promote_test_factor.py --factor-id 101          # dry-run
+python scripts/promote_test_factor.py --factor-id 101 --apply  # 写入正式库
+```
+
+发布前必须存在最新 `env='test'`、`status='approved'` 的验证记录。
+
 ## 3. 与 warehouse 的边界
 
 ### 3.1 分层职责
@@ -303,7 +333,7 @@ factor 层只读 warehouse 的表，只写自己的 `meta_factor_*` / `fact_fact
 
 ```sql
 SELECT component, version FROM meta_schema_version ORDER BY component;
--- factor    1.0.0
+-- factor    1.1.0
 -- warehouse 1.2.0
 ```
 
@@ -544,7 +574,7 @@ python scripts/init_factor_db.py refresh --db "${MARKET_DB_PATH}"
 
 ```sql
 SELECT component, version FROM meta_schema_version ORDER BY component;
--- factor    1.0.0
+-- factor    1.1.0
 -- warehouse 1.2.0
 
 DESCRIBE v_factor_wide;
@@ -655,7 +685,7 @@ WHERE trade_date >= DATE '2024-01-01' AND trade_date < DATE '2025-01-01';
 
 | 版本 | 变更 |
 | --- | --- |
-| `1.0.0` | 初版：4 张 factor 表 + 2 个视图；共享 market 表定义；动态 PIVOT 宽表 + 条件聚合回退；warehouse 版本依赖检查；`installed_version` 组件隔离；`refresh` 子命令；明确 `v_factor_valid` 的「或」语义边界 |
+| `1.1.0` | 初版：4 张 factor 表 + 2 个视图；共享 market 表定义；动态 PIVOT 宽表 + 条件聚合回退；warehouse 版本依赖检查；`installed_version` 组件隔离；`refresh` 子命令；明确 `v_factor_valid` 的「或」语义边界 |
 
 ---
 

@@ -41,6 +41,8 @@ from quant_schema.market_ddl import (
     FACTOR_TABLES,
 )
 
+from data_pipeline.config import market_db_path
+
 LOG = logging.getLogger("init_factor_db")
 
 SCHEMA_VERSION: Final[str] = FACTOR_SCHEMA_VERSION
@@ -390,7 +392,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="init",
         choices=("init", "check", "refresh"),
     )
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+    parser.add_argument("--db", type=Path, default=None)
+    parser.add_argument("--env", choices=("prod", "test"), default="prod")
     parser.add_argument("--threads", type=int, default=DEFAULT_THREADS)
     parser.add_argument(
         "--memory-limit", dest="memory_limit", default=DEFAULT_MEMORY_LIMIT
@@ -423,10 +426,11 @@ _ACTION_LABEL: Final[dict[str, str]] = {
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _setup_logging(args.log_level)
+    db_path = args.db or Path(market_db_path(args.env) or DEFAULT_DB_PATH)
 
     try:
         with database(
-            args.db,
+            db_path,
             threads=args.threads,
             memory_limit=args.memory_limit,
             temp_dir=args.temp_dir,
@@ -442,7 +446,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             LOG.info(
                 "%s 完成  db=%s  component=%s  version=%s",
                 _ACTION_LABEL[args.command],
-                args.db,
+                db_path,
                 COMPONENT,
                 installed_version(con) or "-",
             )

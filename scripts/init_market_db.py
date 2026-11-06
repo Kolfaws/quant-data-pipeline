@@ -31,7 +31,7 @@ from quant_schema._ddl import Table, normalise_type
 from quant_schema.constants import WAREHOUSE_COMPONENT, WAREHOUSE_SCHEMA_VERSION
 from quant_schema.market_ddl import WAREHOUSE_TABLES, WAREHOUSE_VIEWS
 
-from data_pipeline.config import DUCKDB_PATH, LOG_LEVEL
+from data_pipeline.config import DUCKDB_PATH, LOG_LEVEL, market_db_path
 from data_pipeline.db import (
     DEFAULT_MEMORY_LIMIT,
     DEFAULT_THREADS,
@@ -202,7 +202,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="init_market_db.py", description="DuckDB 量化库结构初始化（warehouse）"
     )
     parser.add_argument("command", nargs="?", default="init", choices=("init", "check"))
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
+    parser.add_argument("--db", type=Path, default=None)
+    parser.add_argument("--env", choices=("prod", "test"), default="prod")
     parser.add_argument("--threads", type=int, default=DEFAULT_THREADS)
     parser.add_argument(
         "--memory-limit", dest="memory_limit", default=DEFAULT_MEMORY_LIMIT
@@ -228,9 +229,10 @@ def _setup_logging(level: str) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _setup_logging(args.log_level)
+    db_path = args.db or Path(market_db_path(args.env) or DEFAULT_DB_PATH)
     try:
         with database(
-            args.db,
+            db_path,
             threads=args.threads,
             memory_limit=args.memory_limit,
             temp_dir=args.temp_dir,
@@ -243,7 +245,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             LOG.info(
                 "%s 完成  db=%s  component=%s  version=%s",
                 "校验" if args.command == "check" else "初始化",
-                args.db,
+                db_path,
                 COMPONENT,
                 installed_version(con) or "-",
             )
