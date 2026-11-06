@@ -5,7 +5,7 @@
 ```text
 market.duckdb
 ├── warehouse 组件（component='warehouse'，v1.2.0）  基础行情
-└── factor    组件（component='factor'，v1.0.0）     因子层
+└── factor    组件（component='factor'，v1.1.0）     因子层
 ```
 
 > **表结构不在本仓库硬编码**：DDL 来自 `quant_schema.market_ddl`；
@@ -106,6 +106,25 @@ uv run python scripts/init_factor_db.py refresh
 两个脚本必须指向同一个库文件，并按 `warehouse → factor` 顺序执行。
 初始化期间不要并发写入（DuckDB 跨进程单写者）。
 
+### 测试库
+
+正式库和测试库共用 DDL，但文件独立：
+
+```bash
+# 初始化 market_test.duckdb（warehouse + factor）
+uv run python scripts/init_test_dbs.py
+
+# 从正式库复制 warehouse 行情，供因子/基准实验
+uv run python scripts/sync_test_market.py --apply
+
+# 也可以用 --env test 指定现有初始化命令
+uv run python scripts/init_market_db.py init --env test
+uv run python scripts/init_factor_db.py init --env test
+```
+
+测试因子通过 `quant-factor` 的 `promote_test_factor.py` 发布到正式库；
+测试 backtest 库由 `quant-backtest-engine/scripts/init_test_db.py` 初始化。
+
 ## 6. 摄入行情
 
 ```bash
@@ -153,7 +172,7 @@ warehouse（11 张表 + 2 视图）：
 
 视图：`v_daily_qfq`、`v_daily_hfq`。
 
-factor（4 张表 + 2 视图）：
+factor（7 张表 + 2 视图）：
 
 | 表 | 主键 |
 | --- | --- |
@@ -161,6 +180,9 @@ factor（4 张表 + 2 视图）：
 | `fact_factor_daily` | `(ts_code, trade_date, factor_id)` |
 | `fact_tradable_flag` | `(ts_code, trade_date)` |
 | `fact_factor_quality` | `(factor_id, trade_date)` |
+| `meta_factor_profile` | `factor_id` |
+| `meta_factor_validation` | `(factor_id, env, validated_at)` |
+| `meta_factor_promotion_log` | `promotion_id` |
 
 视图：`v_factor_valid`、`v_factor_wide`（列由活跃因子动态生成）。
 
@@ -192,4 +214,4 @@ Windows 下 POSIX 权限相关用例会自动跳过。
 | --- | --- |
 | `1.1.0` | warehouse 初始结构（8 表 + 2 视图） |
 | `1.2.0` | 新增 `fact_index_daily` / `fact_index_weight` / `fact_fund_daily`；为存量表补主键 |
-| factor `1.0.0` | 因子目录/因子值/可交易标记/质量统计 + 宽表视图 |
+| factor `1.1.0` | 因子目录/因子值/可交易标记/质量/验证/发布 + 宽表视图 |

@@ -35,7 +35,29 @@ def load_dotenv(path: Path | None = None) -> None:
 load_dotenv()
 
 TUSHARE_TOKEN: str | None = os.getenv("TUSHARE_TOKEN") or None
-DUCKDB_PATH: str | None = os.getenv("DUCKDB_PATH") or None
+MARKET_DB_PATH: str | None = os.getenv("MARKET_DB_PATH") or os.getenv("DUCKDB_PATH")
+MARKET_TEST_DB_PATH: str | None = os.getenv("MARKET_TEST_DB_PATH") or os.getenv(
+    "DUCKDB_TEST_PATH"
+)
+# 兼容既有代码：默认指正式库
+DUCKDB_PATH: str | None = MARKET_DB_PATH
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
-__all__ = ["DUCKDB_PATH", "LOG_LEVEL", "PROJECT_ROOT", "TUSHARE_TOKEN", "load_dotenv"]
+
+def market_db_path(env: str = "prod") -> str | None:
+    """返回指定环境的 market.duckdb 路径；未配置返回 None。"""
+    if env not in ("prod", "test"):
+        raise ValueError(f"未知环境：{env!r}；可选 ('prod', 'test')")
+    return MARKET_TEST_DB_PATH if env == "test" else MARKET_DB_PATH
+
+
+__all__ = [
+    "DUCKDB_PATH",
+    "LOG_LEVEL",
+    "MARKET_DB_PATH",
+    "MARKET_TEST_DB_PATH",
+    "PROJECT_ROOT",
+    "TUSHARE_TOKEN",
+    "load_dotenv",
+    "market_db_path",
+]
