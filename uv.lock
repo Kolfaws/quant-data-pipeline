@@ -574,6 +574,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pytz"
+version = "2026.6"
+source = { registry = "https://mirrors.cloud.tencent.com/pypi/simple" }
+sdist = { url = "https://mirrors.cloud.tencent.com/pypi/packages/f5/b0/168030b0bfcc334cf09fa3313afdb888d892c8a0027324683d1de0ec277e/pytz-2026.6.tar.gz", hash = "sha256:3b0fc2727707663d6e517936f444fd8a8b240f1fc32f4bf7ee03274245945284" }
+wheels = [
+    { url = "https://mirrors.cloud.tencent.com/pypi/packages/b6/25/564f3fc5b70c1398d706c51f2b1470d0ea0b1b2f96fee67877b6f5bdf3b6/pytz-2026.6-py2.py3-none-any.whl", hash = "sha256:7fed3fee8fd6bd4a2b7b75a8d56021d0624127bf69bd5691f115db929ac570b3" },
+]
+
+[[package]]
 name = "pyyaml"
 version = "6.0.3"
 source = { registry = "https://mirrors.cloud.tencent.com/pypi/simple" }
@@ -611,28 +620,39 @@ wheels = [
 
 [[package]]
 name = "quant-data-pipeline"
-version = "0.1.0"
+version = "0.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "duckdb" },
-    { name = "numpy" },
-    { name = "pandas" },
     { name = "polars" },
     { name = "pre-commit" },
     { name = "pyarrow" },
+    { name = "pytz" },
+    { name = "quant-db-schema" },
     { name = "tushare" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "duckdb", specifier = ">=2.0.0" },
-    { name = "numpy", specifier = ">=2.5.4" },
-    { name = "pandas", specifier = ">=3.1.1" },
     { name = "polars", specifier = ">=2.1.0" },
     { name = "pre-commit", specifier = ">=4.7.0" },
     { name = "pyarrow", specifier = ">=26.0.1" },
+    { name = "pytz", specifier = ">=2026.6" },
+    { name = "quant-db-schema", editable = "../quant-db-schema" },
     { name = "tushare", specifier = ">=1.4.29" },
 ]
+
+[[package]]
+name = "quant-db-schema"
+version = "0.1.0"
+source = { editable = "../quant-db-schema" }
+dependencies = [
+    { name = "pre-commit" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pre-commit", specifier = ">=4.7.0" }]
 
 [[package]]
 name = "requests"

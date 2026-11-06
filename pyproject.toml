@@ -1,24 +1,38 @@
 [project]
 name = "quant-data-pipeline"
-version = "0.1.0"
-description = "A data pipeline for quantitative finance"
+version = "0.5.0"
+description = "A data pipeline for quantitative finance including db init, data fetching, cleaning, and writing."
 authors = [
     { name = "Kalofaws"}
 ]
 requires-python = ">=3.13"
 dependencies = [
     "duckdb>=2.0.0",
-    "numpy>=2.5.4",
-    "pandas>=3.1.1",
     "polars>=2.1.0",
     "pre-commit>=4.7.0",
     "pyarrow>=26.0.1",
+    "pytz>=2026.6",
+    "quant-db-schema",
     "tushare>=1.4.29",
 ]
 
 [project.scripts]
-quant-data-pipeline = "quant_data_pipeline:main"
+quant-data-pipeline = "data_pipeline:main"
 
 [build-system]
 requires = ["uv_build>=0.13.7,<0.14.0"]
 build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "data_pipeline"
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "scripts"]
+testpaths = ["scripts", "tests"]
+addopts = "-q"
+
+[tool.pyright]
+extraPaths = ["src", "scripts"]
+
+[tool.uv.sources]
+quant-db-schema = { path = "../quant-db-schema", editable = true }
