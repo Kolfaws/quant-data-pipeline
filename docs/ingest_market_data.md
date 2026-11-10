@@ -117,3 +117,20 @@ Tushare 不同积分档位的接口频率差异很大。脚本按以下策略降
 - **写入时报主键冲突**：说明 market 库是旧版本（没有主键）。本仓库默认新建；
   旧库需要迁移/重建后再用 upsert。
 - **DuckDB 文件被占用**：同一文件只允许一个 RW 连接；确认没有另一个初始化/写入进程。
+
+## 9. 接口参考
+
+按 Tushare 官方分类整理的接口字典见 [tushare_refer/README.md](tushare_refer/README.md)：
+
+- 基础信息：`tushare_refer/basic-info/`
+- 财务数据：`tushare_refer/finance-info/`
+- 行情数据：`tushare_refer/quote-info/`
+- 市场参考：`tushare_refer/market-info/`
+- 资金流向：`tushare_refer/moneyflow-info/`
+- ETF：`tushare_refer/etf-info/`
+- 指数：`tushare_refer/index-info/`
+- 宏观：`tushare_refer/macro-info/`
+- 港股 / 美股 / 外汇 / 黄金现货：`tushare_refer/hk-info/`、`us-info/`、`fx-info/`、`sge-info/`
+
+积分与频次对应表见 [tushare_refer/basic-info/points_refer.md](tushare_refer/basic-info/points_refer.md)。
+各接口的积分/权限要求以对应文件中的“积分/权限”段为准；部分接口要求高于 5000 积分或需单独开通权限。
