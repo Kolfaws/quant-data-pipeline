@@ -2,11 +2,11 @@
 
 在已有 `warehouse` 组件之上追加 `factor` 组件：只建 factor 表、视图、写 factor 版本行，不重建行情表，不写入业务数据。
 
-- **Schema 版本**：`1.1.0`
+- **Schema 版本**：`1.2.0`
 - **组件名**：`factor`
 - **库文件**：与 `warehouse` 同库；路径来自 `data_pipeline.config.DUCKDB_PATH`，推荐 `${MARKET_DB_PATH}`
 - **DDL 来源**：`quant_schema.market_ddl.FACTOR_TABLES / FACTOR_STATIC_VIEWS`
-- **依赖**：`init_market_db` 必须先执行，且 warehouse 版本 `>= 1.1.0`（当前 1.2.0）
+- **依赖**：`init_market_db` 必须先执行，且 warehouse 版本 `>= 1.1.0`（当前 1.3.0）
 - **资源**：沿用 `threads=6`、`memory_limit="6GB"`
 
 > `FACTOR_DB_PATH` 已废弃。factor 与 warehouse 必须同库，`v_factor_valid` 才能直接 JOIN。
@@ -73,8 +73,8 @@ import init_factor_db as factor
 with market.database("${MARKET_DB_PATH}") as con:
     market.init_schema(con)                            # 必须先执行
     factor.init_schema(con)                            # 追加 factor 组件
-    print(factor.installed_version(con))               # "1.1.0"
-    print(factor.installed_version(con, "warehouse"))  # "1.2.0"
+    print(factor.installed_version(con))               # "1.2.0"
+    print(factor.installed_version(con, "warehouse"))  # "1.3.0"
     print(factor.table_row_counts(con))
 
 # 因子目录变更后重建宽表视图
@@ -124,7 +124,7 @@ with factor.database("${MARKET_DB_PATH}") as con:
 
 ## 2. Schema
 
-`SCHEMA_VERSION = "1.1.0"`，`component = "factor"`。新增 7 张表 + 2 个视图，并把 2 张共享基础表纳入严格校验。
+`SCHEMA_VERSION = "1.2.0"`，`component = "factor"`。新增 7 张表 + 2 个视图，并把 2 张共享基础表纳入严格校验。
 
 ### 2.1 Overview
 
@@ -140,7 +140,7 @@ with factor.database("${MARKET_DB_PATH}") as con:
 | 8 | `meta_factor_validation` | 表 | `(factor_id, env, validated_at)` | 上线前验证记录 |
 | 9 | `meta_factor_promotion_log` | 表 | `promotion_id` | test -> prod 发布审计 |
 | 10 | `v_factor_wide` | 视图 | — | 动态 PIVOT 宽表 |
-| 11 | `v_factor_valid` | 视图 | — | 带可交易性过滤 |
+| 11 | `v_factor_valid` | 视图 | — | 可交易性 + `is_stale` 过滤 |
 
 自 v1.2.0 起，所有业务表都显式声明主键。ART 索引会增加写入成本，但换来
 “重复摄入/重复计算不可能产生重复行”，避免窗口函数静默错算；因子写入仍建议
@@ -216,6 +216,19 @@ is_sellable    = NOT is_suspended AND NOT is_limit_down AND in_universe
 
 `is_st` 依赖日频 ST 快照。warehouse 当前只有 `dim_stock_basic.name` 的当前快照，这是已知局限。无法补日频 ST 时，factor 层先置 `FALSE`，并在 `meta_ingest_log.detail` 或质量表里记录「ST 未覆盖」——不要伪造历史 ST。
 
+派生脚本：
+
+```bash
+# dry-run：只统计行数，不写库
+python scripts/build_tradable_flags.py --start 2015-01-01 --end 2026-11-05
+
+# 真正写入 fact_tradable_flag（幂等 upsert）
+python scripts/build_tradable_flags.py --start 2015-01-01 --end 2026-11-05 --apply
+```
+
+`is_st` 当前统一写 `FALSE`；脚本会在 `fact_stk_limit` / `dim_stock_basic` 为空时给出 warning，
+`in_universe` 在缺股票列表时退化为“fact_daily 出现即视为在池”。
+
 ### 2.5 `fact_factor_quality` — 批次质量快照
 
 | 字段 | 类型 | 约束 |
@@ -258,12 +271,14 @@ FROM fact_factor_daily f
 JOIN fact_tradable_flag t
   ON t.ts_code = f.ts_code
  AND t.trade_date = f.trade_date
-WHERE t.is_buyable = TRUE OR t.is_sellable = TRUE;
+WHERE f.is_stale = FALSE
+  AND (t.is_buyable = TRUE OR t.is_sellable = TRUE);
 ```
 
 **语义边界**：
 
-- 该条件是「至少一个方向可交易」。涨停股 `is_buyable = FALSE` 但 `is_sellable = TRUE`，会被保留——因为对持仓方它是可卖的。
+- `is_stale = FALSE` 是视图自身保证的：forward-fill 出来的陈旧值不会进入消费视图；调用方不需要再手动过滤。
+- 该条件同时是「至少一个方向可交易」。涨停股 `is_buyable = FALSE` 但 `is_sellable = TRUE`，会被保留——因为对持仓方它是可卖的。
 - 方向过滤必须由策略层完成：买入日加 `AND t.is_buyable`，卖出日加 `AND t.is_sellable`；或用 `fact_tradable_flag` 直接 join。
 - 若上游 `fact_tradable_flag` 有重复 `(ts_code, trade_date)`，视图会放大行数；管道必须先按该键去重。
 
@@ -333,8 +348,8 @@ factor 层只读 warehouse 的表，只写自己的 `meta_factor_*` / `fact_fact
 
 ```sql
 SELECT component, version FROM meta_schema_version ORDER BY component;
--- factor    1.1.0
--- warehouse 1.2.0
+-- factor    1.2.0
+-- warehouse 1.3.0
 ```
 
 | 调用 | 默认 component | 说明 |
@@ -574,8 +589,8 @@ python scripts/init_factor_db.py refresh --db "${MARKET_DB_PATH}"
 
 ```sql
 SELECT component, version FROM meta_schema_version ORDER BY component;
--- factor    1.1.0
--- warehouse 1.2.0
+-- factor    1.2.0
+-- warehouse 1.3.0
 
 DESCRIBE v_factor_wide;
 DESCRIBE v_factor_valid;
@@ -685,6 +700,7 @@ WHERE trade_date >= DATE '2024-01-01' AND trade_date < DATE '2025-01-01';
 
 | 版本 | 变更 |
 | --- | --- |
+| `1.2.0` | `v_factor_valid` 增加 `is_stale = FALSE`；新增 `build_tradable_flags.py` 派生 `fact_tradable_flag`；明确 `is_st` 当前不伪造历史 |
 | `1.1.0` | 初版：4 张 factor 表 + 2 个视图；共享 market 表定义；动态 PIVOT 宽表 + 条件聚合回退；warehouse 版本依赖检查；`installed_version` 组件隔离；`refresh` 子命令；明确 `v_factor_valid` 的「或」语义边界 |
 
 ---

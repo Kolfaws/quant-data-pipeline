@@ -12,6 +12,7 @@ Tushare pro_api
   ├── daily            │    polars DataFrame
   ├── adj_factor       ├──> data_pipeline.sources.tushare_src
   ├── daily_basic      │    （列名对齐 quant_schema.market_ddl）
+  ├── stk_limit        │
   ├── index_daily      │
   ├── fund_daily       │
   └── index_weight    ─┘
@@ -42,8 +43,9 @@ python scripts/ingest_market_data.py \
 | `--calendar` | `SSE` | 交易日历交易所 |
 | `--stocks` | 20 只样本股 | 逗号分隔；传空跳过个股 |
 | `--indexes` | `000300.SH,000905.SH,000852.SH` | 逗号分隔；传空跳过指数 |
-| `--funds` | 空 | 逗号分隔的 ETF |
+| `--funds` | `510300.SH,510500.SH,159915.SZ` | 逗号分隔的 ETF；传空则跳过 |
 | `--daily-basic` | `core` | `all` / `core`（前 5 只）/ `none` |
+| `--stk-limit` | `all` | `all` / `core`（前 5 只）/ `none`；用于派生 `fact_tradable_flag` |
 | `--with-index-weight` | 关 | 需要 Tushare 权限 |
 
 ## 3. 幂等与主键
@@ -55,6 +57,7 @@ python scripts/ingest_market_data.py \
 | `fact_daily` | `(ts_code, trade_date)` |
 | `fact_adj_factor` | `(ts_code, trade_date)` |
 | `fact_daily_basic` | `(ts_code, trade_date)` |
+| `fact_stk_limit` | `(ts_code, trade_date)` |
 | `fact_index_daily` | `(index_code, trade_date)` |
 | `fact_index_weight` | `(index_code, trade_date, con_code)` |
 | `fact_fund_daily` | `(ts_code, trade_date)` |
@@ -72,22 +75,33 @@ Tushare 不同积分档位的接口频率差异很大。脚本按以下策略降
 | `stock_basic` 被限频 | 记录 failed，不阻断日线 |
 | `adj_factor` 被限频 | 跳过该标的复权因子；`fact_daily.pct_chg` 仍可用于收益 |
 | `daily_basic` 被限频 | 跳过；市值加权基准需等该表补齐后再启用 |
+| `stk_limit` 被限频/无权限 | 跳过；`build_tradable_flags.py` 的 `is_limit_up/down` 会退化为 `FALSE` 并告警 |
 | `fund_daily` 无权限 | 记录 failed，ETF 基准保持 `enabled: false` |
 | `index_weight` 无权限 | 首次失败即停止后续月份，动态标的池不可用 |
 
 `TushareSource` 对“频/超限/权限/积分”类错误**不做指数退避重试**，避免继续消耗额度；
 网络类错误仍会重试 3 次。
 
-## 5. 低积分 token 的推荐顺序
+可交易标记不在 ingest 中派生，需在行情和涨跌停就绪后单独执行：
+
+```bash
+python scripts/build_tradable_flags.py --start 2015-01-01 --end 2026-11-05 --apply
+```
+
+## 5. 5000 积分 token 的推荐顺序
 
 1. 先拉个股日线（`daily` 通常额度较高）：
    ```bash
-   python scripts/ingest_market_data.py --indexes= --daily-basic none
+   python scripts/ingest_market_data.py --indexes= --daily-basic none --stk-limit none
    ```
-2. 隔一段时间补 `adj_factor` / `daily_basic`（默认 `core` 只补 5 只）。
+2. 5000 积分可补 `adj_factor` / `daily_basic`，并建议同时补 `stk_limit`：
+   ```bash
+   python scripts/ingest_market_data.py --stocks 600519.SH,... --indexes= --daily-basic all --stk-limit all
+   ```
 3. `index_daily` 有权限时单独补指数；没有权限可用
    `scripts/seed_index_demo.py` 拉公开 K 线，仅用于打通流程。
 4. `index_weight` 有权限后再启用 `BI_EQW_HS300`。
+5. 行情/涨跌停补完后运行 `build_tradable_flags.py`，再使用 `v_factor_valid`。
 
 ## 6. 调度建议
 

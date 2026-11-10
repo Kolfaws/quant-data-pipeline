@@ -19,9 +19,10 @@ END ?= 2026-11-06
 STOCKS ?=
 INDEXES ?=
 DAILY_BASIC ?= core
+STK_LIMIT ?= all
 
 .PHONY: help install install-pip hooks lint format test test-market test-factor \
-        init init-factor check check-factor refresh init-test sync-test ingest seed-index clean
+        init init-factor check check-factor refresh init-test sync-test ingest flags seed-index clean
 
 help:
 	@echo "Quant Data Pipeline"
@@ -40,6 +41,7 @@ help:
 	@echo "  sync-test      正式行情 -> 测试库"
 	@echo ""
 	@echo "  ingest         Tushare -> market.duckdb（幂等）"
+	@echo "  flags          派生 fact_tradable_flag（需先 ingest）"
 	@echo "  seed-index     无 index_daily 权限时的演示指数补数"
 	@echo "  clean          清理缓存"
 	@echo ""
@@ -64,10 +66,10 @@ test:
 	$(PYTEST) -q
 
 test-market:
-	$(PYTEST) scripts/test_init_market_db.py -q
+	$(PYTEST) scripts/test_init_market_db.py scripts/test_market_views.py -q
 
 test-factor:
-	$(PYTEST) scripts/test_init_factor_db.py -q
+	$(PYTEST) scripts/test_init_factor_db.py scripts/test_build_tradable_flags.py -q
 
 init:
 	$(PYTHON) scripts/init_market_db.py init $(if $(DB),--db "$(DB)",)
@@ -93,7 +95,11 @@ sync-test:
 ingest:
 	$(PYTHON) scripts/ingest_market_data.py $(if $(DB),--db "$(DB)",) --start $(START) --end $(END) \
 		$(if $(STOCKS),--stocks $(STOCKS),) $(if $(INDEXES),--indexes $(INDEXES),) \
-		--daily-basic $(DAILY_BASIC)
+		--daily-basic $(DAILY_BASIC) --stk-limit $(STK_LIMIT)
+
+flags:
+	$(PYTHON) scripts/build_tradable_flags.py $(if $(DB),--db "$(DB)",) \
+		--start $(START) --end $(END) --apply
 
 seed-index:
 	$(PYTHON) scripts/seed_index_demo.py $(if $(DB),--db "$(DB)",) --start $(START) --end $(END)

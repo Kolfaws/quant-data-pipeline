@@ -4,8 +4,8 @@
 
 ```text
 market.duckdb
-├── warehouse 组件（component='warehouse'，v1.2.0）  基础行情
-└── factor    组件（component='factor'，v1.1.0）     因子层
+├── warehouse 组件（component='warehouse'，v1.3.0）  基础行情
+└── factor    组件（component='factor'，v1.2.0）     因子层
 ```
 
 > **表结构不在本仓库硬编码**：DDL 来自 `quant_schema.market_ddl`；
@@ -33,14 +33,19 @@ quant-data-pipeline/
 ├── docs/
 │   ├── init_market_db.md       # warehouse 表结构、版本、API
 │   ├── init_factor_db.md       # factor 表结构、宽表视图
-│   └── ingest_market_data.md   # Tushare 摄入与降级策略
+│   ├── ingest_market_data.md   # Tushare 摄入与降级策略
+│   └── tushare_refer/          # Tushare 接口字典（按类别分目录）
 ├── scripts/
 │   ├── init_market_db.py       # warehouse 建表/校验（DDL 来自 quant_schema）
 │   ├── init_factor_db.py       # factor 建表/视图/refresh
 │   ├── ingest_market_data.py   # Tushare -> market.duckdb（幂等）
+│   ├── build_tradable_flags.py # 派生 fact_tradable_flag
 │   ├── seed_index_demo.py      # 无 index_daily 权限时的演示补数
 │   ├── test_init_market_db.py
-│   └── test_init_factor_db.py
+│   ├── test_init_factor_db.py
+│   ├── test_ingest_market_data.py
+│   ├── test_build_tradable_flags.py
+│   └── test_market_views.py
 ├── src/data_pipeline/
 │   ├── config.py               # .env 读取（无 dotenv 依赖）
 │   ├── db.py                   # 统一 DuckDB 连接器（被其他项目复用）
@@ -128,13 +133,17 @@ uv run python scripts/init_factor_db.py init --env test
 ## 6. 摄入行情
 
 ```bash
-# 默认：交易日历 + 股票列表 + 20 只样本股（日线/复权/核心票 daily_basic）+ 3 个指数
+# 默认：交易日历 + 股票列表 + 20 只样本股（日线/复权/核心票 daily_basic/涨跌停）+ 3 个指数 + 3 只宽基 ETF
 uv run python scripts/ingest_market_data.py \
     --db "${MARKET_DB_PATH}" \
     --start 2015-01-01 --end 2026-11-06
 
 # 只补指定股票
 uv run python scripts/ingest_market_data.py --stocks 600519.SH,000858.SZ
+
+# 派生每日可交易标记（依赖 fact_daily + fact_stk_limit）
+uv run python scripts/build_tradable_flags.py \
+    --db "${MARKET_DB_PATH}" --start 2015-01-01 --end 2026-11-05 --apply
 
 # 额外抓指数成分权重（需要 Tushare index_weight 权限）
 uv run python scripts/ingest_market_data.py --with-index-weight
@@ -154,7 +163,7 @@ uv run python scripts/seed_index_demo.py
 
 ## 7. 表结构
 
-warehouse（11 张表 + 2 视图）：
+warehouse（11 张表 + 3 视图 + 1 表宏）：
 
 | 表 | 主键 | 说明 |
 | --- | --- | --- |
@@ -170,7 +179,7 @@ warehouse（11 张表 + 2 视图）：
 | `fact_index_weight` | `(index_code, trade_date, con_code)` | 指数成分权重（v1.2.0 新增） |
 | `fact_fund_daily` | `(ts_code, trade_date)` | ETF/基金日线（v1.2.0 新增） |
 
-视图：`v_daily_qfq`、`v_daily_hfq`。
+视图：`v_daily_qfq`、`v_daily_hfq`、`v_daily_return`；表宏：`qfq_daily(as_of)`。
 
 factor（7 张表 + 2 视图）：
 
@@ -213,5 +222,7 @@ Windows 下 POSIX 权限相关用例会自动跳过。
 | 版本 | 变更 |
 | --- | --- |
 | `1.1.0` | warehouse 初始结构（8 表 + 2 视图） |
+| `1.3.0` | 新增 `qfq_daily(as_of)` 表宏、`v_daily_return` 视图；qfq/hfq 的 `vol` 与价格反向调整、`amount` 保持真实成交额 |
 | `1.2.0` | 新增 `fact_index_daily` / `fact_index_weight` / `fact_fund_daily`；为存量表补主键 |
+| factor `1.2.0` | `v_factor_valid` 增加 `is_stale = FALSE`；新增 `build_tradable_flags.py` |
 | factor `1.1.0` | 因子目录/因子值/可交易标记/质量/验证/发布 + 宽表视图 |
