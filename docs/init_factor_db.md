@@ -206,13 +206,16 @@ with factor.database("${MARKET_DB_PATH}") as con:
 
 ```sql
 is_suspended   = (d.vol IS NULL OR d.vol = 0)
-is_limit_up    = (d.close >= l.up_limit)
-is_limit_down  = (d.close <= l.down_limit)
+is_limit_up    = (d.close >= l.up_limit)   AND (d.trade_date > s.list_date)
+is_limit_down  = (d.close <= l.down_limit) AND (d.trade_date > s.list_date)
 in_universe    = (d.trade_date >= s.list_date)
              AND (s.delist_date IS NULL OR d.trade_date < s.delist_date)
 is_buyable     = NOT is_suspended AND NOT is_limit_up   AND in_universe
 is_sellable    = NOT is_suspended AND NOT is_limit_down AND in_universe
 ```
+
+`list_date` 当日不应用涨跌停：A 股 IPO 首日通常不设涨跌幅限制，Tushare
+`stk_limit` 在该日可能给出参考价，直接比较会把首日误判为涨跌停。
 
 `is_st` 依赖日频 ST 快照。warehouse 当前只有 `dim_stock_basic.name` 的当前快照，这是已知局限。无法补日频 ST 时，factor 层先置 `FALSE`，并在 `meta_ingest_log.detail` 或质量表里记录「ST 未覆盖」——不要伪造历史 ST。
 

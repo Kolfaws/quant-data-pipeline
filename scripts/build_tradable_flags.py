@@ -4,11 +4,14 @@
 规则（与 docs/init_factor_db.md 一致）：
 
     is_suspended  = vol IS NULL OR vol = 0
-    is_limit_up   = close >= up_limit
-    is_limit_down = close <= down_limit
+    is_limit_up   = close >= up_limit    AND trade_date > list_date
+    is_limit_down = close <= down_limit  AND trade_date > list_date
     in_universe   = list_date <= trade_date < delist_date（缺股票列表时退化为 True）
     is_buyable    = NOT suspended AND NOT limit_up AND in_universe
     is_sellable   = NOT suspended AND NOT limit_down AND in_universe
+
+``list_date`` 当日不应用涨跌停：A 股 IPO 首日通常不设涨跌幅限制，
+Tushare 的 ``stk_limit`` 在该日可能给出参考价，直接比较会把首日误判为涨跌停。
 
 已知限制：``dim_stock_basic`` 只有当前快照，没有日频 ST 标记，
 因此 ``is_st`` 统一写 FALSE，不伪造历史；需要时由后续 ST 快照表补齐。
@@ -46,8 +49,16 @@ WITH base AS (
         d.ts_code,
         d.trade_date,
         (d.vol IS NULL OR d.vol = 0) AS is_suspended,
-        (l.up_limit IS NOT NULL AND d.close >= l.up_limit - 1e-9) AS is_limit_up,
-        (l.down_limit IS NOT NULL AND d.close <= l.down_limit + 1e-9) AS is_limit_down,
+        (
+            l.up_limit IS NOT NULL
+            AND d.close >= l.up_limit - 1e-9
+            AND (s.list_date IS NULL OR d.trade_date > s.list_date)
+        ) AS is_limit_up,
+        (
+            l.down_limit IS NOT NULL
+            AND d.close <= l.down_limit + 1e-9
+            AND (s.list_date IS NULL OR d.trade_date > s.list_date)
+        ) AS is_limit_down,
         CASE
             WHEN s.ts_code IS NULL THEN TRUE
             ELSE (s.list_date IS NULL OR d.trade_date >= s.list_date)

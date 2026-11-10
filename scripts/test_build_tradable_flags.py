@@ -65,3 +65,28 @@ def test_idempotent_apply(con) -> None:
     mod.build_flags(con, date(2024, 1, 2), date(2024, 1, 4), apply=True)
     mod.build_flags(con, date(2024, 1, 2), date(2024, 1, 4), apply=True)
     assert con.execute("SELECT count(*) FROM fact_tradable_flag").fetchone()[0] == 3
+
+
+def test_listing_day_is_not_limit_up(con) -> None:
+    """IPO 首日不设涨跌幅，stk_limit 的参考价不能直接用来判定涨停。"""
+    con.execute(
+        "INSERT INTO dim_stock_basic (ts_code, list_status, list_date) "
+        "VALUES ('B', 'L', DATE '2024-01-02')"
+    )
+    con.execute(
+        "INSERT INTO fact_daily (ts_code, trade_date, close, vol) VALUES "
+        "('B', DATE '2024-01-02', 12, 100), "
+        "('B', DATE '2024-01-03', 11, 100)"
+    )
+    con.execute(
+        "INSERT INTO fact_stk_limit (ts_code, trade_date, up_limit, down_limit) VALUES "
+        "('B', DATE '2024-01-02', 11, 9), "
+        "('B', DATE '2024-01-03', 11, 9)"
+    )
+    mod.build_flags(con, date(2024, 1, 2), date(2024, 1, 3), apply=True)
+    rows = con.execute(
+        "SELECT trade_date, is_limit_up, is_buyable FROM fact_tradable_flag "
+        "WHERE ts_code = 'B' ORDER BY trade_date"
+    ).fetchall()
+    assert rows[0] == (date(2024, 1, 2), False, True)
+    assert rows[1] == (date(2024, 1, 3), True, False)
