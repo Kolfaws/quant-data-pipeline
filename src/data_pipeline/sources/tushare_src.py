@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import Any, Final
 
@@ -124,7 +125,19 @@ class TushareSource:
     def _to_polars(raw: Any, api_name: str, params: dict[str, Any]) -> pl.DataFrame:
         try:
             # 不依赖 pyarrow：pandas -> dict-of-lists -> polars
-            frame = pl.DataFrame(raw.to_dict(orient="list"))
+            # Tushare 的股票列表里存在 area=NaN 这类混合值，直接构造会触发
+            # String/Float64 类型冲突；先把 NaN/inf 统一转成 None。
+            data = {
+                column: [
+                    None
+                    if value is None
+                    or (isinstance(value, float) and not math.isfinite(value))
+                    else value
+                    for value in values
+                ]
+                for column, values in raw.to_dict(orient="list").items()
+            }
+            frame = pl.DataFrame(data)
         except Exception as exc:  # pragma: no cover - 异常返回结构
             raise FetchError(f"Tushare {api_name} 返回结构无法转换：{exc}") from exc
 
@@ -161,7 +174,12 @@ class TushareSource:
         )
 
     def fetch_stock_basic(self, list_status: str = "L") -> pl.DataFrame:
-        return self._call("stock_basic", exchange="", list_status=list_status)
+        frame = self._call("stock_basic", exchange="", list_status=list_status)
+        # Tushare 对 list_status='L' 的返回可能省略该列；warehouse 中它是
+        # NOT NULL 过滤键，补上调用参数本身。
+        if "list_status" not in frame.columns:
+            frame = frame.with_columns(pl.lit(list_status).alias("list_status"))
+        return frame
 
     def fetch_daily(self, ts_code: str, start: str, end: str) -> pl.DataFrame:
         return self._call("daily", ts_code=ts_code, start_date=start, end_date=end)

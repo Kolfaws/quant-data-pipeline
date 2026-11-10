@@ -13,6 +13,7 @@ dependencies = [
     "pyarrow>=26.0.1",
     "pytz>=2026.6",
     "quant-db-schema",
+    "six>=1.16.0",
     "tushare>=1.4.29",
 ]
 
