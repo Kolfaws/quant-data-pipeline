@@ -1,9 +1,9 @@
 # init_market_db — market DuckDB 基础数据库结构初始化
 
-该模块只负责三件事：建表、建视图、校验结构。不负责数据摄入，不修改既有数据，用于在数据管道启动前把库结构准备到可用且可验证的状态。
+该模块只负责三件事：建表、建视图/表宏、校验结构。不负责数据摄入，不修改既有数据，用于在数据管道启动前把库结构准备到可用且可验证的状态。
 
-- **Schema 版本**：`1.2.0`（`quant-db-schema` 项目的 `quant_schema.constants.WAREHOUSE_SCHEMA_VERSION`）
-- **DDL 来源**：`quant_schema.market_ddl.WAREHOUSE_TABLES / WAREHOUSE_VIEWS`
+- **Schema 版本**：`1.3.0`（`quant-db-schema` 项目的 `quant_schema.constants.WAREHOUSE_SCHEMA_VERSION`）
+- **DDL 来源**：`quant_schema.market_ddl.WAREHOUSE_TABLES / WAREHOUSE_VIEWS / WAREHOUSE_MACROS`
 - **默认库路径**：来自 `data_pipeline.config.DUCKDB_PATH`，回退 `data/market.duckdb`；
   推荐显式传 `--db "${MARKET_DB_PATH}"`
 - **默认资源**：`threads=6`、`memory_limit="6GB"`
@@ -15,17 +15,17 @@
 ## 1.1 Core Conventions
 
 ```text
-Rules:       只建表、建视图、校验结构
+Rules:       只建表、建视图/表宏、校验结构
 Constraints: import 本模块 -> connect()/database() 拿连接 -> init_schema(con) 一次
 ```
 
 详细约定：
 
-1. **只做结构**。`init_schema` 不写入任何业务数据，只建表、建视图、记录版本号。
+1. **只做结构**。`init_schema` 不写入任何业务数据，只建表、建视图/表宏、记录版本号。
 2. **连接由调用方持有**。`init_schema(con)` 接收外部连接，不关闭它；连接的生命周期由 `connect()` / `database()` 或调用方自己管理。
 3. **幂等**。重复 `init` 不重复建表、不重复版本行（`ON CONFLICT DO UPDATE`）。
-4. **单事务**。DDL、视图、版本写入、校验在同一事务里，失败整体回滚。
-5. **结构漂移即失败**。`verify_schema` 拒绝缺表、缺列、类型不符、多余列；结构变更必须走迁移并升级 `SCHEMA_VERSION`。
+4. **单事务**。DDL、视图/表宏、版本写入、校验在同一事务里，失败整体回滚。
+5. **结构漂移即失败**。`verify_schema` 拒绝缺表、缺列、类型不符、多余列；`verify_views` / `verify_macros` 拒绝缺视图/缺表宏；结构变更必须走迁移并升级 `SCHEMA_VERSION`。
 6. **单写者（跨进程）**。同一个库文件同一时刻只允许一个 RW 连接；只读连接可并存。DuckDB 的锁是跨进程的，同进程多连接会共享实例。
 
 ## 1.2 CLI Conventions
@@ -68,8 +68,9 @@ import init_market_db as mod
 # 推荐：上下文管理器，退出即关闭
 with mod.database("${MARKET_DB_PATH}") as con:
     mod.init_schema(con)
-    print(mod.installed_version(con))    # "1.2.0"
+    print(mod.installed_version(con))    # "1.3.0"
     print(mod.table_row_counts(con))
+    print(mod.view_row_counts(con))      # 空视图通常意味着上游依赖表未补齐
 
 # 只读复用
 with mod.database("${MARKET_DB_PATH}", read_only=True) as con:
@@ -89,8 +90,11 @@ finally:
 | --- | --- |
 | `connect(db_path, *, threads, memory_limit, temp_dir, read_only)` | 打开/创建连接，配置资源，返回连接 |
 | `database(...)` | 上下文管理器版本 |
-| `init_schema(con, *, verify=True)` | 建表 + 建视图 + 写版本 + 可选校验（单事务） |
+| `init_schema(con, *, verify=True)` | 建表 + 建视图/表宏 + 写版本 + 可选校验（单事务） |
 | `verify_schema(con)` | 比对实际结构与 `TABLES`，不一致抛 `SchemaError` |
+| `verify_views(con)` / `verify_macros(con)` | 校验 `VIEWS` / `MACROS` 是否已创建 |
+| `view_row_counts(con)` | 各静态视图行数；用于发现“视图静默为空” |
+| `data_health_warnings(con)` | 检查复权/可交易标记/指数日期等常见数据缺口，返回告警文案 |
 | `installed_version(con, component='warehouse')` | 返回指定组件版本；默认 `warehouse`；行不存在返回 `None`，表不存在抛 `duckdb.Error` |
 | `table_row_counts(con)` | 各表行数；表不存在记 `-1`；视图与非 `TABLES` 表不参与 |
 | `_scalar(con, sql, params=())` | 单值查询；无结果行抛 `SchemaError` |
@@ -123,7 +127,7 @@ finally:
 
 # 2. Database Schema
 
-`SCHEMA_VERSION = "1.2.0"`。共 11 张表 + 2 个视图。
+`SCHEMA_VERSION = "1.3.0"`。共 11 张表 + 3 个视图 + 1 个表宏。
 
 ## 2.1 Overview
 
@@ -148,7 +152,7 @@ finally:
 | 字段 | 类型 | 约束 | 说明 |
 | --- | --- | --- | --- |
 | `component` | `VARCHAR` | `NOT NULL` | 组件名；warehouse 固定 `'warehouse'`，factor 组件为 `'factor'` |
-| `version` | `VARCHAR` | `NOT NULL` | schema 版本号，warehouse 当前 `1.2.0`，factor 为 `1.1.0` |
+| `version` | `VARCHAR` | `NOT NULL` | schema 版本号，warehouse 当前 `1.3.0`，factor 为 `1.2.0` |
 | `applied_at` | `TIMESTAMPTZ` | `NOT NULL DEFAULT current_timestamp` | 版本生效时间 |
 
 约束：`PRIMARY KEY (component)`
@@ -266,9 +270,12 @@ finally:
 | `pre_close` | `DOUBLE` | 前复权前收 |
 | `chg` | `DOUBLE` | 前复权涨跌额 |
 | `pct_chg` | `DOUBLE` | 保持原值 |
-| `vol` | `DOUBLE` | 保持原值 |
-| `amount` | `DECIMAL(20,4)` | 前复权重算成交额 |
+| `vol` | `DOUBLE` | `vol × adj_last / adj_factor`（与价格反向调整） |
+| `amount` | `DECIMAL(20,4)` | 保持原值（真实成交额，不做复权缩放） |
 | `adj_factor` | `DOUBLE` | 复权因子 |
+
+> `v_daily_qfq` 是**展示用**视图：它用全样本最新复权因子归一，历史价格会随未来拆股/分红变化。
+> 研究/回测请使用 `qfq_daily(as_of)`（PIT 安全）或 `v_daily_hfq`；只取收益时优先用 `v_daily_return`。
 
 ## 2.11 `v_daily_hfq` — 后复权日线
 
@@ -284,8 +291,8 @@ finally:
 | `trade_date` | `DATE` | 交易日 |
 | `open` / `high` / `low` / `close` | `DOUBLE` | 后复权价 |
 | `pre_close` | `DOUBLE` | 后复权前收 |
-| `vol` | `DOUBLE` | 保持原值 |
-| `amount` | `DECIMAL(20,4)` | 后复权重算成交额 |
+| `vol` | `DOUBLE` | `vol / adj_factor`（与价格反向调整） |
+| `amount` | `DECIMAL(20,4)` | 保持原值（真实成交额，不做复权缩放） |
 | `adj_factor` | `DOUBLE` | 复权因子 |
 
 注意：`v_daily_hfq` 不输出 `chg` 与 `pct_chg`。
@@ -337,7 +344,30 @@ finally:
 用途：quant-baseline 的 ETF 基准。Tushare `fund_daily` 需要单独权限，
 无权限时该表为空，对应基准保持 `enabled: false`。
 
-## 2.15 类型与命名约定
+## 2.15 `qfq_daily(as_of)` — PIT 安全的前复权表宏
+
+```sql
+SELECT * FROM qfq_daily(DATE '2024-01-01');
+```
+
+- 只使用 `trade_date <= as_of` 的行情和复权因子；
+- `adj_last` 取 `as_of` 及之前最近一条复权因子，不会看到未来拆股；
+- 输出列与 `v_daily_qfq` 相同（价格/成交量复权，`amount` 保持真实值）；
+- 与 `v_daily_qfq` 的区别：同一段历史在不同 `as_of` 下结果一致，适合回测/因子研究。
+
+## 2.16 `v_daily_return` — 日收益视图
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `ts_code` | `VARCHAR` | 股票代码 |
+| `trade_date` | `DATE` | 交易日 |
+| `ret_1d` | `DOUBLE` | `pct_chg / 100`，Tushare 已按除权昨收计算 |
+
+用途：给 baseline / factor / analytics 提供唯一的日收益口径，避免各自用未复权
+close 计算收益。`ret_1d` 为总收益近似值；需要复权价格时用 `v_daily_hfq` 或
+`qfq_daily(as_of)`。
+
+## 2.17 类型与命名约定
 
 | 约定 | 内容 |
 | --- | --- |
@@ -389,12 +419,18 @@ try:
 
     for name, sql in VIEWS.items():
         con.execute(f'CREATE OR REPLACE VIEW "{name}" AS {sql}')  # 3. 视图
+    for _name, sql in MACROS.items():
+        con.execute(sql)                                         # 4. 表宏
+
+    if verify:
+        verify_views(con)
+        verify_macros(con)
 
     con.execute(
         "INSERT INTO meta_schema_version (component, version) "
         "VALUES ('warehouse', ?) "
         "ON CONFLICT (component) DO UPDATE SET "
-        "version = excluded.version, applied_at = now()",       # 4. 版本 upsert
+        "version = excluded.version, applied_at = now()",       # 5. 版本 upsert
         [SCHEMA_VERSION],
     )
     con.execute("COMMIT")
@@ -405,7 +441,8 @@ except Exception:
 
 顺序设计的原因：
 
-- **先校验、后建视图**：视图 SQL 依赖表结构（`d.open` 等）。若表已存在但残缺，先建视图会抛 `BinderException`，`SchemaError` 就无法按预期暴露。把 `verify_schema` 放在建表后、建视图前，残缺表会以 `SchemaError` 形式暴露，错误信息带表名。
+- **先校验、后建视图/表宏**：视图 SQL 依赖表结构（`d.open` 等）。若表已存在但残缺，先建视图会抛 `BinderException`，`SchemaError` 就无法按预期暴露。把 `verify_schema` 放在建表后、建视图前，残缺表会以 `SchemaError` 形式暴露，错误信息带表名。
+- **表宏在视图之后**：`qfq_daily(as_of)` 依赖 `fact_daily` / `fact_adj_factor` 表结构；视图和表宏都建完后再统一 `verify_views` / `verify_macros`。
 - **版本行用 `now()`**：`current_timestamp` 在 `ON CONFLICT DO UPDATE SET applied_at = current_timestamp` 上下文里会被 DuckDB 解析为列引用而报 `BinderException`，必须换成 `now()`。
 - **单事务**：任何一步失败整体回滚，不会留下建了半张表的中间态。
 
@@ -424,6 +461,12 @@ except Exception:
 
 **为什么拒绝多余列**：允许加列会让代码定义的结构和实际结构长期漂移，`verify_schema` 失去意义。任何结构变化必须升级 `SCHEMA_VERSION` 并写迁移。
 
+### 3.3.1 `verify_views()` / `verify_macros()` — 运行对象校验
+
+- `verify_views`：从 `duckdb_views()` 取 `main` 下的视图名，要求 `VIEWS` 全部存在；
+- `verify_macros`：从 `duckdb_functions()` 取 `function_type = 'table_macro'`，要求 `MACROS` 全部存在；
+- `check` 命令会同时执行 `verify_schema`、`verify_views`、`verify_macros`，避免“表结构对但视图/表宏被删”的假健康状态。
+
 ## 3.4 版本记录
 
 - 表 `meta_schema_version(component, version, applied_at)`，主键 `component`。
@@ -441,6 +484,11 @@ except Exception:
 3. 只返回 `TABLES` 里定义的表，视图不参与，用户自建表被忽略。
 
 用于 CLI 初始化后打印状态，以及 `test_table_row_counts_*` 系列。
+
+`view_row_counts()` 对 `VIEWS` 逐个 `count(*)`，CLI 会同时打印；`data_health_warnings()` 在
+`fact_daily` 有数据但 `fact_adj_factor` / `fact_tradable_flag` 为空时给出显式 warning，
+避免 qfq/hfq/factor_valid 视图静默为空；当 `fact_index_daily` 最新日期晚于 `fact_daily`
+时也会提示跨表 join 丢行风险。
 
 注意：`meta_schema_version` 在 `init` 后是 `1` 行（版本记录），其余业务表是 `0`。`test_table_row_counts_after_init_returns_zero` 已按此修正。
 
@@ -487,7 +535,8 @@ pytest -q scripts/test_init_market_db.py
 
 | 类别 | 用例 |
 | --- | --- |
-| 建表 / 视图 | `test_init_creates_tables_and_views` |
+| 建表 / 视图 / 表宏 | `test_init_creates_tables_and_views` |
+| 视图/表宏语义 | `test_market_views.py`：qfq/hfq 量价、`qfq_daily` PIT、`v_daily_return`、`v_factor_valid` stale |
 | 幂等 / 版本唯一 | `test_init_is_idempotent`、`test_init_does_not_duplicate_version_rows` |
 | 结构漂移 | `test_verify_detects_schema_drift`、`test_verify_detects_extra_column` |
 | memory_limit | `test_memory_limit_accepts_valid`、`test_memory_limit_takes_effect`、`test_memory_limit_rejects_invalid`（含 `4 GB`） |
@@ -497,6 +546,7 @@ pytest -q scripts/test_init_market_db.py
 | 只读 / 并发 | `test_read_only_connection_can_query`、`test_multiple_readers_coexist`、`test_same_process_rw_connections_share_instance` |
 | `_scalar` | 返回值、参数绑定、无行抛错、关闭连接上抛 |
 | `table_row_counts` | 未 init 全 `-1`、init 后版本表 `1` 其余 `0`、插入后反映、忽略外部表 / 视图、类型纯净 |
+| `view_row_counts` | `VIEWS` 逐个计数；空视图可被 CLI/告警发现 |
 | `installed_version` | 行缺失返回 `None`、未 init 抛 `duckdb.Error` |
 | CLI | `test_cli_exit_codes`、`test_cli_rejects_injection_attempt` |
 
@@ -508,6 +558,7 @@ pytest -q scripts/test_init_market_db.py
 
 | 版本 | 变更 |
 | --- | --- |
+| `1.3.0` | 新增 `qfq_daily(as_of)` 表宏与 `v_daily_return` 视图；qfq/hfq 的 `vol` 与价格反向调整、`amount` 保持真实成交额；`verify_views` / `verify_macros` / `view_row_counts` / 数据健康告警 |
 | `1.2.0` | DDL 迁移到 `quant_schema.market_ddl`；新增 `fact_index_daily` / `fact_index_weight` / `fact_fund_daily`；为 `dim_stock_basic` / `dim_trade_cal` / 四张 fact 表补主键；连接器迁移到 `data_pipeline.db` |
 | `1.1.0` | 新增 `v_daily_qfq` / `v_daily_hfq` 视图；`TIMESTAMPTZ` 归一化；`_scalar` 无行抛 `SchemaError`；CLI 退出码 0/1/2；`init_schema` 改显式事务；`verify_schema` 提前到建视图前；版本 upsert 用 `now()`；`memory_limit` 正则禁止中间空格 |
 | `1.0.0` | 初始 schema（8 张表 + 版本记录 + 幂等初始化） |

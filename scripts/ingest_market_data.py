@@ -7,7 +7,7 @@
 * 每张表的写入结果记录到 ``meta_ingest_log``。
 
 示例：
-    # 初始化 + 拉取交易日历、股票列表、20 只样本股、3 个指数
+    # 初始化 + 拉取交易日历、股票列表、20 只样本股、3 个指数、3 只宽基 ETF
     python scripts/ingest_market_data.py --db "$DUCKDB_PATH" \\
         --start 2015-01-01 --end 2026-11-06
 
@@ -61,6 +61,8 @@ DEFAULT_STOCKS: Final[tuple[str, ...]] = (
     "601857.SH",
 )
 DEFAULT_INDEXES: Final[tuple[str, ...]] = ("000300.SH", "000905.SH", "000852.SH")
+#: 默认只取 3 只宽基 ETF；没有 fund_daily 权限时会逐只 warning 并跳过。
+DEFAULT_FUNDS: Final[tuple[str, ...]] = ("510300.SH", "510500.SH", "159915.SZ")
 CORE_STOCKS: Final[tuple[str, ...]] = DEFAULT_STOCKS[:5]
 
 
@@ -217,37 +219,63 @@ def ingest_stock_basic(con, source: TushareSource) -> None:
 
 
 def _ingest_stock(con, source: TushareSource, ts_code: str, args) -> None:
-    started = datetime.now(UTC)
+    """按表独立抓取，任一辅助表限频/无权限不阻断日线。"""
     scope = f"{ts_code}:{args.start}:{args.end}"
-    scopes: list[str] = []
-    try:
-        daily = source.fetch_daily(ts_code, args.start_compact, args.end_compact)
-        rows = upsert(con, "fact_daily", daily, ("ts_code", "trade_date"))
-        scopes.append(f"fact_daily={rows}")
 
-        adj = source.fetch_adj_factor(ts_code, args.start_compact, args.end_compact)
-        rows = upsert(con, "fact_adj_factor", adj, ("ts_code", "trade_date"))
-        scopes.append(f"fact_adj_factor={rows}")
-    except FetchError as exc:
-        log_ingest(con, "fact_daily", scope, 0, "failed", started, str(exc)[:500])
-        LOG.warning("%s 跳过：%s", ts_code, exc)
+    def _write(
+        table: str,
+        fetch,
+        *,
+        keys: tuple[str, ...] = ("ts_code", "trade_date"),
+    ) -> int | None:
+        started = datetime.now(UTC)
+        try:
+            frame = fetch()
+            rows = upsert(con, table, frame, keys)
+        except FetchError as exc:
+            log_ingest(con, table, scope, 0, "failed", started, str(exc)[:500])
+            LOG.warning("%s %s 跳过：%s", ts_code, table, exc)
+            return None
+        log_ingest(con, table, scope, rows, "ok", started)
+        if rows == 0:
+            LOG.warning("%s %s 返回 0 行", ts_code, table)
+        else:
+            LOG.info("%s %s：%d 行", ts_code, table, rows)
+        return rows
+
+    daily_rows = _write(
+        "fact_daily",
+        lambda: source.fetch_daily(ts_code, args.start_compact, args.end_compact),
+    )
+    if daily_rows is None:
         return
+
+    _write(
+        "fact_adj_factor",
+        lambda: source.fetch_adj_factor(ts_code, args.start_compact, args.end_compact),
+    )
 
     want_basic = args.daily_basic == "all" or (
         args.daily_basic == "core" and ts_code in CORE_STOCKS
     )
     if want_basic:
-        try:
-            basic = source.fetch_daily_basic(
+        _write(
+            "fact_daily_basic",
+            lambda: source.fetch_daily_basic(
                 ts_code, args.start_compact, args.end_compact
-            )
-            rows = upsert(con, "fact_daily_basic", basic, ("ts_code", "trade_date"))
-            scopes.append(f"fact_daily_basic={rows}")
-        except FetchError as exc:
-            LOG.warning("%s daily_basic 跳过：%s", ts_code, exc)
+            ),
+        )
 
-    log_ingest(con, "fact_daily", scope, 0, "ok", started, " ; ".join(scopes))
-    LOG.info("%s 完成：%s", ts_code, ", ".join(scopes))
+    want_limit = args.stk_limit == "all" or (
+        args.stk_limit == "core" and ts_code in CORE_STOCKS
+    )
+    if want_limit:
+        _write(
+            "fact_stk_limit",
+            lambda: source.fetch_stk_limit(
+                ts_code, args.start_compact, args.end_compact
+            ),
+        )
 
 
 def ingest_indexes(con, source: TushareSource, args) -> None:
@@ -389,12 +417,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--indexes", default=",".join(DEFAULT_INDEXES), help="逗号分隔的指数代码"
     )
-    parser.add_argument("--funds", default="", help="逗号分隔的 ETF 代码")
+    parser.add_argument(
+        "--funds", default=",".join(DEFAULT_FUNDS), help="逗号分隔的 ETF 代码"
+    )
     parser.add_argument(
         "--daily-basic",
         choices=("all", "core", "none"),
         default="core",
         help="daily_basic 抓取范围：all=全部股票，core=前 5 只核心票，none=跳过",
+    )
+    parser.add_argument(
+        "--stk-limit",
+        dest="stk_limit",
+        choices=("all", "core", "none"),
+        default="all",
+        help="stk_limit 抓取范围：all=全部股票，core=前 5 只核心票，none=跳过",
     )
     parser.add_argument(
         "--with-index-weight",

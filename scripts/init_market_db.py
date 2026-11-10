@@ -29,7 +29,7 @@ from typing import Any, Final
 import duckdb
 from quant_schema._ddl import Table, normalise_type
 from quant_schema.constants import WAREHOUSE_COMPONENT, WAREHOUSE_SCHEMA_VERSION
-from quant_schema.market_ddl import WAREHOUSE_TABLES, WAREHOUSE_VIEWS
+from quant_schema.market_ddl import WAREHOUSE_MACROS, WAREHOUSE_TABLES, WAREHOUSE_VIEWS
 
 from data_pipeline.config import DUCKDB_PATH, LOG_LEVEL, market_db_path
 from data_pipeline.db import (
@@ -41,16 +41,21 @@ from data_pipeline.db import (
 )
 
 __all__ = [
+    "MACROS",
     "TABLES",
     "VIEWS",
     "ConfigError",
     "SchemaError",
     "connect",
+    "data_health_warnings",
     "database",
     "init_schema",
     "installed_version",
     "table_row_counts",
+    "verify_macros",
     "verify_schema",
+    "verify_views",
+    "view_row_counts",
 ]
 
 LOG = logging.getLogger("init_market_db")
@@ -60,6 +65,7 @@ COMPONENT: Final[str] = WAREHOUSE_COMPONENT
 # 兼容既有调用方 / 测试：表与视图定义以 quant_schema 为准。
 TABLES: Final[tuple[Table, ...]] = WAREHOUSE_TABLES
 VIEWS: Final[dict[str, str]] = WAREHOUSE_VIEWS
+MACROS: Final[dict[str, str]] = WAREHOUSE_MACROS
 
 
 def _load_config_defaults() -> tuple[Path, str]:
@@ -138,8 +144,76 @@ def verify_schema(con: duckdb.DuckDBPyConnection) -> None:
         )
 
 
+def verify_views(con: duckdb.DuckDBPyConnection) -> None:
+    """确认 WAREHOUSE_VIEWS 中的视图都已创建。"""
+    existing = {
+        str(row[0])
+        for row in con.execute(
+            "SELECT view_name FROM duckdb_views() WHERE schema_name = 'main'"
+        ).fetchall()
+    }
+    missing = sorted(set(VIEWS) - existing)
+    if missing:
+        raise SchemaError(f"缺视图：{missing}；请执行 init_market_db.py init")
+
+
+def verify_macros(con: duckdb.DuckDBPyConnection) -> None:
+    """确认 WAREHOUSE_MACROS 中的表宏都已创建。"""
+    existing = {
+        str(row[0])
+        for row in con.execute(
+            "SELECT function_name FROM duckdb_functions() "
+            "WHERE function_type = 'table_macro'"
+        ).fetchall()
+    }
+    missing = sorted(set(MACROS) - existing)
+    if missing:
+        raise SchemaError(f"缺表宏：{missing}；请执行 init_market_db.py init")
+
+
+def _table_count_if_exists(con: duckdb.DuckDBPyConnection, name: str) -> int:
+    rows = con.execute(
+        "SELECT 1 FROM duckdb_tables() WHERE schema_name = 'main' AND table_name = ?",
+        [name],
+    ).fetchall()
+    if not rows:
+        return 0
+    return int(_scalar(con, f'SELECT count(*) FROM "{name}"'))
+
+
+def data_health_warnings(con: duckdb.DuckDBPyConnection) -> list[str]:
+    """检查“表有数据但派生视图必空”的常见状态，返回可读告警。"""
+    counts = table_row_counts(con)
+    warnings: list[str] = []
+    if counts.get("fact_daily", 0) > 0:
+        if counts.get("fact_adj_factor", 0) == 0:
+            warnings.append(
+                "fact_daily 有数据但 fact_adj_factor 为空："
+                "v_daily_qfq / v_daily_hfq / qfq_daily 将为空；"
+                "研究请先用 v_daily_return，或补齐复权因子"
+            )
+        if _table_count_if_exists(con, "fact_tradable_flag") == 0:
+            warnings.append(
+                "fact_tradable_flag 为空：v_factor_valid 将为空；"
+                "请先 init_factor_db，再运行 scripts/build_tradable_flags.py"
+            )
+        if counts.get("fact_index_daily", 0) > 0:
+            daily_max = _scalar(con, "SELECT max(trade_date) FROM fact_daily")
+            index_max = _scalar(con, "SELECT max(trade_date) FROM fact_index_daily")
+            if (
+                daily_max is not None
+                and index_max is not None
+                and index_max > daily_max
+            ):
+                warnings.append(
+                    f"fact_index_daily 最新日期 {index_max} 晚于 fact_daily {daily_max}："
+                    "跨表 join 会丢指数行；请确认个股数据是否未更新到最新交易日"
+                )
+    return warnings
+
+
 def init_schema(con: duckdb.DuckDBPyConnection, *, verify: bool = True) -> None:
-    """幂等建表 + 建视图 + 记录版本号；DDL 与校验同事务，失败整体回滚。"""
+    """幂等建表 + 建视图/表宏 + 记录版本号；DDL 与校验同事务，失败整体回滚。"""
     con.execute("BEGIN TRANSACTION")
     try:
         for table in TABLES:
@@ -150,6 +224,11 @@ def init_schema(con: duckdb.DuckDBPyConnection, *, verify: bool = True) -> None:
 
         for name, sql in VIEWS.items():
             con.execute(f'CREATE OR REPLACE VIEW "{name}" AS {sql}')
+        for sql in MACROS.values():
+            con.execute(sql)
+        if verify:
+            verify_views(con)
+            verify_macros(con)
 
         con.execute(
             "INSERT INTO meta_schema_version (component, version) VALUES (?, ?) "
@@ -192,6 +271,11 @@ def table_row_counts(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
         # SECURITY: table.name 来自模块常量，无外部输入
         out[table.name] = int(_scalar(con, f'SELECT count(*) FROM "{table.name}"'))
     return out
+
+
+def view_row_counts(con: duckdb.DuckDBPyConnection) -> dict[str, int]:
+    """各静态视图当前行数；为空通常意味着上游依赖表未补齐。"""
+    return {name: int(_scalar(con, f'SELECT count(*) FROM "{name}"')) for name in VIEWS}
 
 
 # ---------------------------------------------------------------------------
@@ -239,9 +323,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         ) as con:
             if args.command == "check":
                 verify_schema(con)
+                verify_views(con)
+                verify_macros(con)
             else:
                 init_schema(con)
             counts = table_row_counts(con)
+            views = view_row_counts(con)
             LOG.info(
                 "%s 完成  db=%s  component=%s  version=%s",
                 "校验" if args.command == "check" else "初始化",
@@ -251,6 +338,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             for name, rows in counts.items():
                 LOG.info("  %-20s %10d", name, rows)
+            for name, rows in views.items():
+                LOG.info("  view %-15s %10d", name, rows)
+            for warning in data_health_warnings(con):
+                LOG.warning("%s", warning)
     except ConfigError as exc:
         LOG.error("配置错误：%s", exc)
         return 2

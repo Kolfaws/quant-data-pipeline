@@ -26,6 +26,7 @@ _DATE_COLS: Final[dict[str, tuple[str, ...]]] = {
     "daily": ("trade_date",),
     "adj_factor": ("trade_date",),
     "daily_basic": ("trade_date",),
+    "stk_limit": ("trade_date",),
     "index_daily": ("trade_date",),
     "fund_daily": ("trade_date",),
     "index_weight": ("trade_date",),
@@ -172,6 +173,10 @@ class TushareSource:
         return self._call(
             "daily_basic", ts_code=ts_code, start_date=start, end_date=end
         )
+
+    def fetch_stk_limit(self, ts_code: str, start: str, end: str) -> pl.DataFrame:
+        """每日涨跌停价；单次最多 5800 行，按股票代码循环提取。"""
+        return self._call("stk_limit", ts_code=ts_code, start_date=start, end_date=end)
 
     def fetch_index_daily(self, index_code: str, start: str, end: str) -> pl.DataFrame:
         return self._call(
