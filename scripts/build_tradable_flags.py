@@ -102,7 +102,8 @@ ON CONFLICT (ts_code, trade_date) DO UPDATE SET
 
 
 def _count(con: duckdb.DuckDBPyConnection, table: str) -> int:
-    return int(con.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0])
+    row = con.execute(f'SELECT count(*) FROM "{table}"').fetchone()
+    return 0 if row is None else int(row[0])
 
 
 def _count_range(
