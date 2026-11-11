@@ -46,7 +46,7 @@ repos:
     hooks:
       - id: codespell
         args: ["--ignore-words-list=ba,hist,nd"]
-        exclude: ^(.*\.ipynb|.*\.csv|.*\.svg|.*\.lock)$
+        exclude: ^(.*\.ipynb|.*\.csv|.*\.svg|.*\.lock|.*\.md)$
 
   # 4. Notebook 输出清理（保持仓库体积可控）
   - repo: https://github.com/kynan/nbstripout
