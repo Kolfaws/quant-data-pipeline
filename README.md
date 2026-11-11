@@ -39,6 +39,7 @@ quant-data-pipeline/
 │   ├── init_market_db.py       # warehouse 建表/校验（DDL 来自 quant_schema）
 │   ├── init_factor_db.py       # factor 建表/视图/refresh
 │   ├── ingest_market_data.py   # Tushare -> market.duckdb（幂等）
+│   ├── import_refer_docs.py    # refer.txt -> docs/tushare_refer/*.md
 │   ├── build_tradable_flags.py # 派生 fact_tradable_flag
 │   ├── seed_index_demo.py      # 无 index_daily 权限时的演示补数
 │   ├── test_init_market_db.py
