@@ -31,6 +31,7 @@ market.duckdb
 quant-data-pipeline/
 ├── data/                       # 本地中转目录（可选）
 ├── docs/
+│   ├── README.md                # 按需阅读索引
 │   ├── init_market_db.md       # warehouse 表结构、版本、API
 │   ├── init_factor_db.md       # factor 表结构、宽表视图
 │   ├── ingest_market_data.md   # Tushare 摄入与降级策略
@@ -198,6 +199,7 @@ factor（7 张表 + 2 视图）：
 
 字段级说明：
 
+- [docs/README.md](docs/README.md)（按需阅读索引）
 - [docs/init_market_db.md](docs/init_market_db.md)
 - [docs/init_factor_db.md](docs/init_factor_db.md)
 
