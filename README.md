@@ -1,5 +1,11 @@
 # Quant Data Pipeline
 
+## Overview
+
+Quant Data Pipeline is the sole writer of market.duckdb, covering schema initialization and Tushare market-data ingestion.
+It maintains both warehouse and factor schemas, imports daily prices, adjustments, limits, indices, and ETF data, and records ingest batches.
+The project enforces single-writer access and keeps the current research database limited to 2010 data.
+
 统一数据底座的**唯一写入方**：负责 `market.duckdb`（路径由 `${MARKET_DB_PATH}` 指定）的建表、行情摄入与因子层结构。
 
 ```text
