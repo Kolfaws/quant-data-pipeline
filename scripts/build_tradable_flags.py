@@ -17,8 +17,11 @@ Tushare 的 ``stk_limit`` 在该日可能给出参考价，直接比较会把首
 因此 ``is_st`` 统一写 FALSE，不伪造历史；需要时由后续 ST 快照表补齐。
 
 用法：
-    python scripts/build_tradable_flags.py --start 2015-01-01 --end 2026-11-05
-    python scripts/build_tradable_flags.py --start 2015-01-01 --end 2026-11-05 --apply
+    python scripts/build_tradable_flags.py --start 2010-01-01 --end 2010-12-31
+    python scripts/build_tradable_flags.py --start 2010-01-01 --end 2010-12-31 --apply
+
+写入闸门：默认区间是 2010；目标为 ``MARKET_DB_PATH`` 且 ``end > 2010-12-31``
+时 fail-fast，``--allow-post-2010`` 只用于新库/新版本。
 """
 
 from __future__ import annotations
@@ -38,8 +41,14 @@ from quant_schema.constants import (
     FACT_TRADABLE_FLAG,
 )
 
-from data_pipeline.config import DUCKDB_PATH, LOG_LEVEL, market_db_path
-from data_pipeline.db import DEFAULT_MEMORY_LIMIT, DEFAULT_THREADS, database
+from data_pipeline.config import LOG_LEVEL
+from data_pipeline.db import (
+    DEFAULT_MEMORY_LIMIT,
+    DEFAULT_THREADS,
+    ConfigError,
+    database,
+)
+from data_pipeline.guards import enforce_research_2010_gate, require_market_db_path
 
 LOG = logging.getLogger("build_tradable_flags")
 
@@ -179,10 +188,20 @@ def build_flags(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="build_tradable_flags.py")
-    parser.add_argument("--db", type=Path, default=None)
-    parser.add_argument("--start", default="2015-01-01", help="YYYY-MM-DD")
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=None,
+        help="market.duckdb 路径；缺省读 MARKET_DB_PATH，未配置则报错",
+    )
+    parser.add_argument("--start", default="2010-01-01", help="YYYY-MM-DD")
     parser.add_argument(
         "--end", default=None, help="YYYY-MM-DD；默认 fact_daily 最大日期"
+    )
+    parser.add_argument(
+        "--allow-post-2010",
+        action="store_true",
+        help="仅新库/新版本：允许 end>2010-12-31；不作用于 MARKET_DB_PATH 研究库",
     )
     parser.add_argument("--apply", action="store_true", help="真正写入；默认 dry-run")
     parser.add_argument("--threads", type=int, default=DEFAULT_THREADS)
@@ -207,25 +226,44 @@ def _setup_logging(level: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _setup_logging(args.log_level)
-    db_path = args.db or Path(
-        market_db_path("prod") or DUCKDB_PATH or "data/market.duckdb"
-    )
-    start = date.fromisoformat(args.start)
+
     try:
+        db_path = require_market_db_path(args.db)
+        start = date.fromisoformat(args.start)
+        end: date | None = None
+        if args.end:
+            end = date.fromisoformat(args.end)
+            # fail-fast：显式 end 在打开连接前就过闸门。
+            enforce_research_2010_gate(
+                db_path,
+                end,
+                allow_post_2010=args.allow_post_2010,
+                action="写入 fact_tradable_flag",
+            )
         with database(
-            db_path, threads=args.threads, memory_limit=args.memory_limit
+            db_path,
+            threads=args.threads,
+            memory_limit=args.memory_limit,
+            read_only=not args.apply,
         ) as con:
-            if args.end:
-                end = date.fromisoformat(args.end)
-            else:
+            if end is None:
                 row = con.execute(
                     f'SELECT max(trade_date) FROM "{FACT_DAILY}"'
                 ).fetchone()
                 if row is None or row[0] is None:
                     raise ValueError(f"{FACT_DAILY} 为空")
                 end = row[0]
+                enforce_research_2010_gate(
+                    db_path,
+                    end,
+                    allow_post_2010=args.allow_post_2010,
+                    action="写入 fact_tradable_flag",
+                )
             stats = build_flags(con, start, end, apply=args.apply)
             LOG.info("完成：%s", stats)
+    except ConfigError as exc:
+        LOG.error("配置错误：%s", exc)
+        return 2
     except Exception as exc:  # noqa: BLE001 - CLI 顶层
         LOG.error("失败：%s", exc)
         return 1

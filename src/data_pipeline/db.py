@@ -21,6 +21,8 @@ from typing import Final
 
 import duckdb
 
+from data_pipeline.core.errors import ConfigError
+
 LOG = logging.getLogger("data_pipeline.db")
 
 DEFAULT_THREADS: Final[int] = 6
@@ -28,10 +30,6 @@ DEFAULT_MEMORY_LIMIT: Final[str] = "6GB"
 _MEMORY_LIMIT_RE: Final[re.Pattern[str]] = re.compile(
     r"^\d+(?:\.\d+)?(?:MB|GB|TB)$", re.IGNORECASE
 )
-
-
-class ConfigError(ValueError):
-    """连接参数非法。"""
 
 
 def quote_literal(value: str) -> str:

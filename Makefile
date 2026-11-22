@@ -14,8 +14,11 @@ PYTEST ?= $(UV) run --with pytest python -m pytest
 RUFF ?= $(UV) run --with ruff ruff
 
 DB ?= $(DUCKDB_PATH)
-START ?= 2015-01-01
-END ?= 2026-11-06
+# 当前研究库只保留 2010；默认区间固定为 2010，写 2011+ 需新库并显式 ALLOW_POST_2010=1。
+START ?= 2010-01-01
+END ?= 2010-12-31
+ALLOW_POST_2010 ?= 0
+POST_2010_FLAG := $(if $(filter 1 true yes,$(ALLOW_POST_2010)),--allow-post-2010,)
 STOCKS ?=
 INDEXES ?=
 DAILY_BASIC ?= core
@@ -40,12 +43,13 @@ help:
 	@echo "  init-test      初始化测试库 market_test.duckdb"
 	@echo "  sync-test      正式行情 -> 测试库"
 	@echo ""
-	@echo "  ingest         Tushare -> market.duckdb（幂等）"
-	@echo "  flags          派生 fact_tradable_flag（需先 ingest）"
-	@echo "  seed-index     无 index_daily 权限时的演示指数补数"
+	@echo "  ingest         Tushare -> market.duckdb（幂等，默认 2010）"
+	@echo "  flags          派生 fact_tradable_flag（需先 ingest，默认 2010）"
+	@echo "  seed-index     无 index_daily 权限时的演示指数补数（默认 2010）"
 	@echo "  clean          清理缓存"
 	@echo ""
-	@echo "当前 DB=$(DB) START=$(START) END=$(END)"
+	@echo "当前 DB=$(DB) START=$(START) END=$(END) ALLOW_POST_2010=$(ALLOW_POST_2010)"
+	@echo "写 2011+ 到新库：make ingest DB=<新库> START=2011-01-01 END=2011-12-31 ALLOW_POST_2010=1"
 
 install:
 	$(UV) sync
@@ -94,15 +98,17 @@ sync-test:
 
 ingest:
 	$(PYTHON) scripts/ingest_market_data.py $(if $(DB),--db "$(DB)",) --start $(START) --end $(END) \
+		$(POST_2010_FLAG) \
 		$(if $(STOCKS),--stocks $(STOCKS),) $(if $(INDEXES),--indexes $(INDEXES),) \
 		--daily-basic $(DAILY_BASIC) --stk-limit $(STK_LIMIT)
 
 flags:
 	$(PYTHON) scripts/build_tradable_flags.py $(if $(DB),--db "$(DB)",) \
-		--start $(START) --end $(END) --apply
+		--start $(START) --end $(END) $(POST_2010_FLAG) --apply
 
 seed-index:
-	$(PYTHON) scripts/seed_index_demo.py $(if $(DB),--db "$(DB)",) --start $(START) --end $(END)
+	$(PYTHON) scripts/seed_index_demo.py $(if $(DB),--db "$(DB)",) \
+		--start $(START) --end $(END) $(POST_2010_FLAG)
 
 clean:
 	$(PYTHON) -c "import pathlib, shutil; [shutil.rmtree(p, ignore_errors=True) for r in (pathlib.Path('src'), pathlib.Path('scripts'), pathlib.Path('tests')) if r.exists() for p in r.rglob('__pycache__')]"

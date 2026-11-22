@@ -4,8 +4,9 @@
 
 - **Schema 版本**：`1.3.0`（`quant-db-schema` 项目的 `quant_schema.constants.WAREHOUSE_SCHEMA_VERSION`）
 - **DDL 来源**：`quant_schema.market_ddl.WAREHOUSE_TABLES / WAREHOUSE_VIEWS / WAREHOUSE_MACROS`
-- **默认库路径**：来自 `data_pipeline.config.DUCKDB_PATH`，回退 `data/market.duckdb`；
-  推荐显式传 `--db "${MARKET_DB_PATH}"`
+- **默认库路径**：无默认值——必须显式传 `--db` 或设置 `MARKET_DB_PATH`；
+  `--env test` 只读 `MARKET_TEST_DB_PATH`，缺失时立即失败（退出码 2），
+  不会回退正式库或相对路径
 - **默认资源**：`threads=6`、`memory_limit="6GB"`
 
 ---
@@ -45,12 +46,15 @@ python init_market_db.py init \
 | 参数 | 默认 | 约束 |
 | --- | --- | --- |
 | `command` | `init` | `init` / `check` |
-| `--db` | config 的 `DUCKDB_PATH` | 文件路径或 `:memory:` |
+| `--db` | 无（读 `MARKET_DB_PATH`） | 文件路径或 `:memory:`；两者都没有则退出码 2 |
 | `--env` | `prod` | `prod` / `test`；未传 `--db` 时按环境选择路径 |
 | `--threads` | `6` | `int`，`[1, 128]`，拒绝 `bool` |
 | `--memory-limit` | `6GB` | 匹配 `^\d+(\.\d+)?(?:MB | GB | TB)$`（不允许中间空格） |
 | `--temp-dir` | 无 | 目录会被 `mkdir(mode=0700)` |
 | `--log-level` | config 的 `LOG_LEVEL` | `DEBUG / INFO / WARNING / ERROR` |
+
+`--env test` 的路径只来自 `MARKET_TEST_DB_PATH`：缺失、或与 `MARKET_DB_PATH`
+指向同一文件时 CLI 立即失败（退出码 2），不创建/不写正式库。
 
 **退出码**：
 
@@ -58,7 +62,7 @@ python init_market_db.py init \
 | --- | --- |
 | `0` | 成功 |
 | `1` | `duckdb.Error` 或 `SchemaError` |
-| `2` | `ConfigError`（参数非法） |
+| `2` | `ConfigError`（参数非法、库路径缺失、test 环境未配置） |
 
 ## 1.3 Python API Conventions
 
@@ -518,11 +522,14 @@ return row[0]
 `data_pipeline.config` 是 `quant-data-pipeline` 包内的模块，由 editable 依赖直接安装；
 `scripts/init_market_db.py` 不再修改 `sys.path`。
 
-1. `from data_pipeline.config import DUCKDB_PATH, LOG_LEVEL`；
-2. `DUCKDB_PATH` 为空 → 回退 `data/market.duckdb`；
-3. 数据库路径/Token 由 `.env` 或环境变量提供。
+1. `from data_pipeline.config import LOG_LEVEL`（只用日志级别配置）；
+2. 库路径由 `data_pipeline.guards.require_market_db_path` 解析：
+   `--db` 优先；否则按 `--env` 读 `MARKET_DB_PATH` / `MARKET_TEST_DB_PATH`
+   （旧名 `DUCKDB_PATH` / `DUCKDB_TEST_PATH` 作为兼容别名）；
+3. **没有相对路径回退**：路径缺失立即 `ConfigError` → 退出码 2；
+4. 数据库路径/Token 由 `.env` 或环境变量提供。
 
-推荐在 `.env` 里显式写 `DUCKDB_PATH=/absolute/path/to/market.duckdb`，或 CLI 传 `--db`。
+推荐在 `.env` 里显式写 `MARKET_DB_PATH=/absolute/path/to/market.duckdb`，或 CLI 传 `--db`。
 
 > 注意：`threads` / `memory_limit` 不从 config 读，只走 CLI 或显式传参。
 
@@ -549,6 +556,7 @@ pytest -q scripts/test_init_market_db.py
 | `view_row_counts` | `VIEWS` 逐个计数；空视图可被 CLI/告警发现 |
 | `installed_version` | 行缺失返回 `None`、未 init 抛 `duckdb.Error` |
 | CLI | `test_cli_exit_codes`、`test_cli_rejects_injection_attempt` |
+| 显式路径 / test env / 2010 闸门 | `test_write_guards.py`：`--env test` 缺路径返回 2 且不创建正式库、2011+ 拒绝、`--allow-post-2010` 边界 |
 
 关于 `test_second_writer_is_rejected`：DuckDB 的写锁是跨进程的，同进程内多连接会共享实例、不会失败，所以该测试已改名为 `test_same_process_rw_connections_share_instance`，验证同进程共享实例这一真实行为；跨进程单写者契约由 DuckDB 自身保证。
 

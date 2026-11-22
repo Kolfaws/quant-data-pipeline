@@ -184,6 +184,22 @@ class TushareSource:
     def fetch_daily(self, ts_code: str, start: str, end: str) -> pl.DataFrame:
         return self._call("daily", ts_code=ts_code, start_date=start, end_date=end)
 
+    def fetch_daily_cross_section(self, day: str) -> pl.DataFrame:
+        return self._call("daily", trade_date=day)
+
+    def fetch_adjustment_cross_section(self, day: str) -> pl.DataFrame:
+        return self._call("adj_factor", trade_date=day)
+
+    def fetch_stock_snapshot(self, exchange: str, status: str) -> pl.DataFrame:
+        from quant_schema.postgres_ddl import STOCK
+
+        return self._call(
+            "stock_basic",
+            exchange=exchange,
+            list_status=status,
+            fields=",".join(STOCK.names),
+        )
+
     def fetch_adj_factor(self, ts_code: str, start: str, end: str) -> pl.DataFrame:
         return self._call("adj_factor", ts_code=ts_code, start_date=start, end_date=end)
 

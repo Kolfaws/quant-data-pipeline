@@ -1,12 +1,6 @@
 # Quant Data Pipeline
 
-## Overview
-
-Quant Data Pipeline is the sole writer of market.duckdb, covering schema initialization and Tushare market-data ingestion.
-It maintains both warehouse and factor schemas, imports daily prices, adjustments, limits, indices, and ETF data, and records ingest batches.
-The project enforces single-writer access and keeps the current research database limited to 2010 data.
-
-统一数据底座的**唯一写入方**：负责 `market.duckdb`（路径由 `${MARKET_DB_PATH}` 指定）的建表、行情摄入与因子层结构。
+负责 PostgreSQL 日频行情发布，以及现有研究库 `market.duckdb` 的建表、行情摄入与因子层结构。DuckDB 路径由 `${MARKET_DB_PATH}` 指定。
 
 ```text
 market.duckdb
@@ -24,12 +18,12 @@ market.duckdb
 | **quant-data-pipeline** | `market.duckdb`：warehouse + factor 表结构；写入基础行情 | RW |
 | quant-baseline | 只读 `market.duckdb`；写 `backtest.duckdb` 的基准表 | market RO |
 | quant-backtest-engine | 建 `backtest.duckdb`；写净值 | market RO |
-| factor-research | 写 `market.duckdb` 的 factor 组件 | market RW |
+| quant-factor | 写 `market.duckdb` 的 factor 组件 | market RW |
 
-- **保持本项目纯净**：只碰 `market.duckdb`，不建 `backtest.duckdb` 的表。
-- **单写多读**：DuckDB 写入以文件为单位加锁；factor_research 与 backtest 同时运行时，
+- 行情管道管理 PostgreSQL 行情结构与 `market.duckdb`，回测表由 backtest engine 管理。
+- **单写多读**：DuckDB 写入以文件为单位加锁；quant-factor 与 backtest 同时运行时，
   backtest 必须以 `read_only=True` 打开。
-- 因子写入采用 `DELETE + INSERT` 的增量方式，不做整库重建。
+- 因子值写入由 quant-factor 负责；本项目只初始化 factor 表结构。
 
 ## 2. 目录结构
 
@@ -53,10 +47,12 @@ quant-data-pipeline/
 │   ├── test_init_factor_db.py
 │   ├── test_ingest_market_data.py
 │   ├── test_build_tradable_flags.py
+│   ├── test_write_guards.py    # 显式路径 / test env / 2010 写入闸门
 │   └── test_market_views.py
 ├── src/data_pipeline/
 │   ├── config.py               # .env 读取（无 dotenv 依赖）
 │   ├── db.py                   # 统一 DuckDB 连接器（被其他项目复用）
+│   ├── guards.py               # 显式库路径 / 2010 写入闸门
 │   ├── logger.py
 │   ├── core/errors.py
 │   └── sources/tushare_src.py  # Tushare -> polars
@@ -94,26 +90,31 @@ uv sync
 
 ```env
 TUSHARE_TOKEN=
-DUCKDB_PATH=/absolute/path/to/market.duckdb
+MARKET_DB_PATH=/absolute/path/to/market.duckdb
+MARKET_TEST_DB_PATH=/absolute/path/to/market_test.duckdb
 LOG_LEVEL=INFO
 ```
 
 - 真实环境变量优先于 `.env`；`.env` 已被 gitignore，禁止提交。
 - `.env` 由 `src/data_pipeline/config.py` 直接解析，不依赖 `python-dotenv`。
 - 代码中不写死任何绝对路径或 Token。
+- **库路径必须显式**：`--db` 或环境变量；脚本不再回退 `data/market.duckdb`
+  这类相对默认路径。旧变量名 `DUCKDB_PATH` / `DUCKDB_TEST_PATH` 仍作为兼容别名读取。
+- `--env test` 只读 `MARKET_TEST_DB_PATH`；未配置时立即失败（退出码 2），
+  不会回退正式库。
 
 ## 5. 初始化
 
 ```bash
-# 1) warehouse（必须先执行）
-uv run python scripts/init_market_db.py init
+# 1) warehouse（必须先执行；--db 或 MARKET_DB_PATH 必须显式）
+uv run python scripts/init_market_db.py init --db "${MARKET_DB_PATH}"
 
 # 2) factor（会检查 warehouse 版本 >= 1.1.0）
-uv run python scripts/init_factor_db.py init
+uv run python scripts/init_factor_db.py init --db "${MARKET_DB_PATH}"
 
 # 3) 校验；因子目录变更后刷新宽表视图
-uv run python scripts/init_factor_db.py check
-uv run python scripts/init_factor_db.py refresh
+uv run python scripts/init_factor_db.py check --db "${MARKET_DB_PATH}"
+uv run python scripts/init_factor_db.py refresh --db "${MARKET_DB_PATH}"
 ```
 
 两个脚本必须指向同一个库文件，并按 `warehouse → factor` 顺序执行。
@@ -130,41 +131,57 @@ uv run python scripts/init_test_dbs.py
 # 从正式库复制 warehouse 行情，供因子/基准实验
 uv run python scripts/sync_test_market.py --apply
 
-# 也可以用 --env test 指定现有初始化命令
+# 也可以用 --env test 指定现有初始化命令（需配置 MARKET_TEST_DB_PATH）
 uv run python scripts/init_market_db.py init --env test
 uv run python scripts/init_factor_db.py init --env test
 ```
 
-测试因子通过 `quant-factor` 的 `promote_test_factor.py` 发布到正式库；
-测试 backtest 库由 `quant-backtest-engine/scripts/init_test_db.py` 初始化。
+因子正式发布入口待实现，设计与验收见 [QuantData 存储与研究架构](../docs/quantdata-postgresql-duckdb-design.md)。
+测试回测库由 [`init_test_db.py`](../quant-backtest-engine/scripts/init_test_db.py) 初始化。
 
 ## 6. 摄入行情
 
 ```bash
-# 默认：交易日历 + 股票列表 + 20 只样本股（日线/复权/核心票 daily_basic/涨跌停）+ 3 个指数 + 3 只宽基 ETF
+# 当前研究库只保留 2010；脚本默认区间就是 2010-01-01..2010-12-31
+# 范围：交易日历 + 股票列表 + 样本股（日线/复权/核心票 daily_basic/涨跌停）+ 3 个指数 + 3 只宽基 ETF
 uv run python scripts/ingest_market_data.py \
     --db "${MARKET_DB_PATH}" \
-    --start 2015-01-01 --end 2026-11-06
+    --start 2010-01-01 --end 2010-12-31
 
-# 只补指定股票
+# 只补指定股票（区间仍取默认 2010）
 uv run python scripts/ingest_market_data.py --stocks 600519.SH,000858.SZ
 
 # 派生每日可交易标记（依赖 fact_daily + fact_stk_limit）
 uv run python scripts/build_tradable_flags.py \
-    --db "${MARKET_DB_PATH}" --start 2015-01-01 --end 2026-11-05 --apply
+    --db "${MARKET_DB_PATH}" --start 2010-01-01 --end 2010-12-31 --apply
 
 # 额外抓指数成分权重（需要 Tushare index_weight 权限）
 uv run python scripts/ingest_market_data.py --with-index-weight
 
 # 没有 index_daily 权限时，可用公开 K 线补指数（仅演示/应急）
-uv run python scripts/seed_index_demo.py
+uv run python scripts/seed_index_demo.py --db "${MARKET_DB_PATH}"
+```
+
+**2010 写入闸门**：`ingest_market_data.py` / `build_tradable_flags.py` /
+`seed_index_demo.py` 的默认区间是 2010；目标为 `MARKET_DB_PATH` 且
+`end > 2010-12-31` 时 fail-fast（退出码 2，不写库）。写 2011+ 只能用新库/新版本：
+
+```bash
+# --allow-post-2010 只对新库/新版本生效，不能解锁当前研究库
+uv run python scripts/ingest_market_data.py \
+    --db "${MARKET_TEST_DB_PATH}" \
+    --start 2011-01-01 --end 2011-12-31 --allow-post-2010
 ```
 
 写入策略：
 
+- **整批一个事务**：行情写入与 `meta_ingest_log` 同一事务提交；
+  `duckdb.Error` / 中断会整批回滚，并在回滚后补写一条 failed 批次日志，
+  不会出现“部分表已写、无记录”；
 - 每张表 `INSERT ... ON CONFLICT (主键) DO UPDATE`，重复执行行数不膨胀；
-- 每张表的批次写入结果记入 `meta_ingest_log`；
-- 限频/权限错误会记录 warning 并跳过，不阻断其他标的；
+- 限频/权限错误（`FetchError`）记 failed 日志后跳过，不阻断其他标的；
+- 每条 `meta_ingest_log.detail` 带 `batch_id=<uuid>`；另有一行
+  `table_name='ingest_batch'` 的批次汇总（ok/failed + 错误摘要）；
 - 交易日历接口不可用时，自动从 `fact_daily` 的交易日反推 `dim_trade_cal`。
 
 详细说明见 [docs/ingest_market_data.md](docs/ingest_market_data.md)。
@@ -176,7 +193,7 @@ warehouse（11 张表 + 3 视图 + 1 表宏）：
 | 表 | 主键 | 说明 |
 | --- | --- | --- |
 | `meta_schema_version` | `component` | warehouse / factor 各一行 |
-| `meta_ingest_log` | `(table_name, scope_key)` | 摄入批次 |
+| `meta_ingest_log` | `(table_name, scope_key)` | 摄入批次；`detail` 含 `batch_id`/错误，`ingest_batch` 行为批次汇总 |
 | `dim_stock_basic` | `ts_code` | 股票基础信息 |
 | `dim_trade_cal` | `(exchange, cal_date)` | 交易日历 |
 | `fact_daily` | `(ts_code, trade_date)` | 个股日线 |
@@ -222,6 +239,7 @@ make format
 
 ```bash
 uv run --with pytest pytest scripts/test_init_market_db.py scripts/test_init_factor_db.py -q
+uv run --with pytest pytest scripts/test_write_guards.py -q   # 2010 闸门 / test env / 显式路径
 ```
 
 Windows 下 POSIX 权限相关用例会自动跳过。
@@ -235,3 +253,40 @@ Windows 下 POSIX 权限相关用例会自动跳过。
 | `1.2.0` | 新增 `fact_index_daily` / `fact_index_weight` / `fact_fund_daily`；为存量表补主键 |
 | factor `1.2.0` | `v_factor_valid` 增加 `is_stale = FALSE`；新增 `build_tradable_flags.py` |
 | factor `1.1.0` | 因子目录/因子值/可交易标记/质量/验证/发布 + 宽表视图 |
+
+## 10. PostgreSQL 日频首批
+
+安装 `uv sync --extra postgres`，按 `.env.example` 配置 `POSTGRE_IP`、`POSTGRE_DB`、
+管理员、writer、reader 和 `TUSHARE_TOKEN`。初始化用管理员，摄入用 writer，查询和导出用
+reader。单一 DSN 环境可以设置 `QUANTDATA_POSTGRES_DSN` 并自行管理权限。
+`--env-file` 选择项目配置，可通过 `QUANTDATA_POSTGRES_ENV` 引用共享 `.env`。
+进程环境优先，其次是显式文件，再其次是被引用的文件。
+
+```powershell
+uv run --extra postgres python scripts/market_postgres.py init
+uv run --extra postgres python scripts/market_postgres.py check
+uv run --extra postgres python scripts/market_postgres.py ingest --start 2010-01-04 --end 2010-01-08
+uv run --extra postgres python scripts/market_postgres.py export --start 2010-01-04 --end 2010-01-08 --version 1 --output research-input-2010
+```
+
+每批接收最多 31 个自然日。当前来源覆盖上交所、深交所的交易日历、股票基础资料与
+上市/退市日期、未复权日线和对应复权因子，价格及量额沿用 Tushare 日线单位。
+停牌与供应商个股漏采尚无独立来源对账。若日线含供应商当前档案中缺失的历史代码，保留
+其行情并在导出清单列出这些代码，上市及退市日期继续留空。
+导出按发布版本和日期生成 Parquet 与校验清单，可用 `--code` 限定标的，DuckDB 可直接
+用 `read_parquet` 读取。历史回填记录实际采集时间，股票现状和复权历史不保证严格 PIT。
+
+正式因子表已定义。因子发布工作流、受审修订和 L0 原始响应归档属于后续接入范围。
+
+## 11. PostgreSQL 回测净值
+
+回测引擎在 DuckDB 计算并保存成功 run。通过管道发布净值时，明确选择 DuckDB 文件、
+run ID 和用于该次回测的行情发布版本。发布时校验版本覆盖净值日期。相同净值和表内元数据重跑
+返回已有修订，内容变化生成新修订。完整策略配置和其他指标由原 DuckDB run 保存。
+reader 按 run ID 和修订号回读，CSV 可供 DuckDB 或看板使用。
+
+```powershell
+uv run --extra postgres python scripts/market_postgres.py init-nav
+uv run --extra postgres python scripts/market_postgres.py publish-nav --duckdb path/to/backtest.duckdb --run-id example --input-version 1
+uv run --extra postgres python scripts/market_postgres.py export-nav --run-id example --revision 1 --output nav.csv
+```

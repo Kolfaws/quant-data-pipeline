@@ -8,9 +8,12 @@
 
 写入表：``fact_index_daily``（主键 ``index_code, trade_date``，幂等 upsert）。
 
+写入闸门：默认区间是 2010；目标为 ``MARKET_DB_PATH`` 且 ``end > 2010-12-31``
+时 fail-fast，``--allow-post-2010`` 只用于新库/新版本。
+
 用法：
-    python scripts/seed_index_demo.py --db "$DUCKDB_PATH" \\
-        --start 2015-01-01 --end 2026-11-06
+    python scripts/seed_index_demo.py --db "${MARKET_DB_PATH}" \\
+        --start 2010-01-01 --end 2010-12-31
 """
 
 from __future__ import annotations
@@ -23,6 +26,8 @@ from pathlib import Path
 import init_market_db as market
 import polars as pl
 import requests
+
+from data_pipeline.guards import enforce_research_2010_gate, require_market_db_path
 
 LOG = logging.getLogger("seed_index_demo")
 
@@ -115,14 +120,28 @@ def upsert(con, table: str, frame: pl.DataFrame, keys: tuple[str, ...]) -> int:
     return frame.height
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="seed_index_demo.py")
-    parser.add_argument("--db", type=Path, default=market.DEFAULT_DB_PATH)
-    parser.add_argument("--start", default="2015-01-01")
-    parser.add_argument("--end", default=date.today().isoformat())
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=None,
+        help="market.duckdb 路径；缺省读 MARKET_DB_PATH，未配置则报错",
+    )
+    parser.add_argument("--start", default="2010-01-01")
+    parser.add_argument("--end", default="2010-12-31")
+    parser.add_argument(
+        "--allow-post-2010",
+        action="store_true",
+        help="仅新库/新版本：允许 end>2010-12-31；不作用于 MARKET_DB_PATH 研究库",
+    )
     parser.add_argument("--indexes", default=",".join(DEFAULT_INDEXES))
     parser.add_argument("--log-level", default="INFO")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     logging.basicConfig(
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)-7s | %(message)s",
@@ -130,7 +149,15 @@ def main(argv: list[str] | None = None) -> int:
 
     indexes = [item.strip() for item in args.indexes.split(",") if item.strip()]
     try:
-        with market.database(args.db) as con:
+        db_path = require_market_db_path(args.db)
+        # fail-fast：先过闸门，避免为越界区间发网络请求。
+        enforce_research_2010_gate(
+            db_path,
+            args.end,
+            allow_post_2010=args.allow_post_2010,
+            action="写入 fact_index_daily",
+        )
+        with market.database(db_path) as con:
             market.init_schema(con)
             for code in indexes:
                 frame = fetch_index(code, args.start, args.end)
@@ -144,7 +171,10 @@ def main(argv: list[str] | None = None) -> int:
                     frame["trade_date"][0],
                     frame["trade_date"][-1],
                 )
-            LOG.info("完成：db=%s version=%s", args.db, market.installed_version(con))
+            LOG.info("完成：db=%s version=%s", db_path, market.installed_version(con))
+    except market.ConfigError as exc:
+        LOG.error("配置错误：%s", exc)
+        return 2
     except Exception as exc:  # noqa: BLE001
         LOG.error("失败：%s", exc)
         return 1

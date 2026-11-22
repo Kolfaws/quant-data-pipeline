@@ -4,7 +4,8 @@
 
 - **Schema 版本**：`1.2.0`
 - **组件名**：`factor`
-- **库文件**：与 `warehouse` 同库；路径来自 `data_pipeline.config.DUCKDB_PATH`，推荐 `${MARKET_DB_PATH}`
+- **库文件**：与 `warehouse` 同库；路径必须显式（`--db` 或 `MARKET_DB_PATH`），
+  `--env test` 只读 `MARKET_TEST_DB_PATH`，缺失时立即失败、不回退正式库
 - **DDL 来源**：`quant_schema.market_ddl.FACTOR_TABLES / FACTOR_STATIC_VIEWS`
 - **依赖**：`init_market_db` 必须先执行，且 warehouse 版本 `>= 1.1.0`（当前 1.3.0）
 - **资源**：沿用 `threads=6`、`memory_limit="6GB"`
@@ -47,8 +48,8 @@ python scripts/init_factor_db.py init \
 | 参数 | 默认 | 约束 |
 | --- | --- | --- |
 | `command` | `init` | `init` / `check` / `refresh` |
-| `--db` | config `DUCKDB_PATH` | 文件路径或 `:memory:` |
-| `--env` | `prod` | `prod` / `test`；未传 `--db` 时按环境选择路径 |
+| `--db` | 无（读 `MARKET_DB_PATH`） | 文件路径或 `:memory:`；两者都没有则退出码 2 |
+| `--env` | `prod` | `prod` / `test`；`test` 必配 `MARKET_TEST_DB_PATH`，缺失立即失败 |
 | `--threads` | `6` | `[1,128]`，拒绝 `bool` |
 | `--memory-limit` | `6GB` | `^\d+(\.\d+)?(?:MB\|GB\|TB)$`（不允许中间空格） |
 | `--temp-dir` | 无 | 目录会被 `mkdir(mode=0700)` |
@@ -62,7 +63,7 @@ python scripts/init_factor_db.py init \
 | --- | --- |
 | `0` | 成功 |
 | `1` | `duckdb.Error` 或 `SchemaError` |
-| `2` | `ConfigError`（参数非法） |
+| `2` | `ConfigError`（参数非法、库路径缺失、test 环境未配置 PATH） |
 
 ### 1.3 Python API
 
@@ -222,12 +223,18 @@ is_sellable    = NOT is_suspended AND NOT is_limit_down AND in_universe
 派生脚本：
 
 ```bash
-# dry-run：只统计行数，不写库
-python scripts/build_tradable_flags.py --start 2015-01-01 --end 2026-11-05
+# dry-run：只统计行数，不写库（默认区间 2010-01-01..fact_daily 最大日期）
+python scripts/build_tradable_flags.py --db "${MARKET_DB_PATH}" \
+    --start 2010-01-01 --end 2010-12-31
 
 # 真正写入 fact_tradable_flag（幂等 upsert）
-python scripts/build_tradable_flags.py --start 2015-01-01 --end 2026-11-05 --apply
+python scripts/build_tradable_flags.py --db "${MARKET_DB_PATH}" \
+    --start 2010-01-01 --end 2010-12-31 --apply
 ```
+
+写入闸门：`--db` 缺省读 `MARKET_DB_PATH`；目标为 `MARKET_DB_PATH` 且
+`end > 2010-12-31` 时 fail-fast（退出码 2）。写 2011+ 只允许新库/新版本并显式加
+`--allow-post-2010`（该 flag 不作用于当前研究库）。
 
 `is_st` 当前统一写 `FALSE`；脚本会在 `fact_stk_limit` / `dim_stock_basic` 为空时给出 warning，
 `in_universe` 在缺股票列表时退化为“fact_daily 出现即视为在池”。
@@ -304,14 +311,9 @@ python scripts/init_test_dbs.py
 python scripts/sync_test_market.py --apply
 ```
 
-研究验证通过后，由 quant-factor 的 `scripts/promote_test_factor.py` 发布：
-
-```bash
-python scripts/promote_test_factor.py --factor-id 101          # dry-run
-python scripts/promote_test_factor.py --factor-id 101 --apply  # 写入正式库
-```
-
-发布前必须存在最新 `env='test'`、`status='approved'` 的验证记录。
+当前已有验证和发布日志的 DDL，正式因子发布入口待实现。未来发布须附测试环境有效的
+验收证据及正式发布批准。研究门槛见[因子研究流水线](../../docs/analysis-pipeline.md)，
+发布和迁移契约见 [QuantData 存储与研究架构](../../docs/quantdata-postgresql-duckdb-design.md)。
 
 ## 3. 与 warehouse 的边界
 
