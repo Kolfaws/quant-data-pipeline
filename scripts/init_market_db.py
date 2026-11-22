@@ -8,8 +8,12 @@ Constraints:
     import 本模块 -> connect()/database() 拿连接 -> init_schema(con) 一次
 
 用法：
-    python init_market_db.py init  --db "$DUCKDB_PATH"
-    python init_market_db.py check --db "$DUCKDB_PATH"
+    python init_market_db.py init  --db "${MARKET_DB_PATH}"
+    python init_market_db.py check --db "${MARKET_DB_PATH}"
+
+    库路径必须显式：传 --db，或由环境变量提供。
+    --env test 只读 MARKET_TEST_DB_PATH；未配置时立即失败（退出码 2），
+    不会回退正式库。
 
 与 factor 组件的关系：
     meta_schema_version 是组件无关的共享表，warehouse 与 factor 各占一行。
@@ -31,7 +35,7 @@ from quant_schema._ddl import Table, normalise_type
 from quant_schema.constants import WAREHOUSE_COMPONENT, WAREHOUSE_SCHEMA_VERSION
 from quant_schema.market_ddl import WAREHOUSE_MACROS, WAREHOUSE_TABLES, WAREHOUSE_VIEWS
 
-from data_pipeline.config import DUCKDB_PATH, LOG_LEVEL, market_db_path
+from data_pipeline.config import LOG_LEVEL
 from data_pipeline.db import (
     DEFAULT_MEMORY_LIMIT,
     DEFAULT_THREADS,
@@ -39,6 +43,7 @@ from data_pipeline.db import (
     connect,
     database,
 )
+from data_pipeline.guards import require_market_db_path
 
 __all__ = [
     "MACROS",
@@ -68,12 +73,8 @@ VIEWS: Final[dict[str, str]] = WAREHOUSE_VIEWS
 MACROS: Final[dict[str, str]] = WAREHOUSE_MACROS
 
 
-def _load_config_defaults() -> tuple[Path, str]:
-    db_path = Path(DUCKDB_PATH) if DUCKDB_PATH else Path("data/market.duckdb")
-    return db_path, LOG_LEVEL
-
-
-DEFAULT_DB_PATH, DEFAULT_LOG_LEVEL = _load_config_defaults()
+#: 日志级别默认值来自 config；库路径没有默认值，必须显式 --db 或环境变量。
+DEFAULT_LOG_LEVEL: Final[str] = LOG_LEVEL
 
 _COMPONENT_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 _TYPE_ALIASES: Final[dict[str, str]] = {"TIMESTAMPTZ": "TIMESTAMP WITH TIME ZONE"}
@@ -313,13 +314,14 @@ def _setup_logging(level: str) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _setup_logging(args.log_level)
-    db_path = args.db or Path(market_db_path(args.env) or DEFAULT_DB_PATH)
     try:
+        db_path = require_market_db_path(args.db, env=args.env)
         with database(
             db_path,
             threads=args.threads,
             memory_limit=args.memory_limit,
             temp_dir=args.temp_dir,
+            read_only=args.command == "check",
         ) as con:
             if args.command == "check":
                 verify_schema(con)

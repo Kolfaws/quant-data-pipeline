@@ -4,15 +4,26 @@
 职责：
 * 只写 ``market.duckdb``（warehouse 组件），不碰 backtest.duckdb；
 * 采用 ``INSERT ... ON CONFLICT DO UPDATE``，可反复执行、行数不膨胀；
-* 每张表的写入结果记录到 ``meta_ingest_log``。
+* 每张表的写入结果记录到 ``meta_ingest_log``；
+* 整批摄入共用一个事务：数据与 ``meta_ingest_log`` 同事务提交/回滚，
+  中断或 ``duckdb.Error`` 不会留下“部分表已写、无记录”的状态。
+
+写入闸门：
+* 默认区间是 2010-01-01..2010-12-31（当前研究库只保留 2010）；
+* 目标为 ``MARKET_DB_PATH`` 且 ``end > 2010-12-31`` 时 fail-fast；
+* ``--allow-post-2010`` 只用于新库/新版本，不能解锁当前研究库。
 
 示例：
-    # 初始化 + 拉取交易日历、股票列表、20 只样本股、3 个指数、3 只宽基 ETF
-    python scripts/ingest_market_data.py --db "$DUCKDB_PATH" \\
-        --start 2015-01-01 --end 2026-11-06
+    # 默认只摄入 2010；当前研究库请显式传 2010 区间
+    python scripts/ingest_market_data.py --db "${MARKET_DB_PATH}" \\
+        --start 2010-01-01 --end 2010-12-31
 
     # 只补指定股票
     python scripts/ingest_market_data.py --stocks 600519.SH,000858.SZ
+
+    # 新库/新版本写 2011+：必须显式 --allow-post-2010，且 --db 不能是研究库
+    python scripts/ingest_market_data.py --db "$MARKET_TEST_DB_PATH" \\
+        --start 2011-01-01 --end 2011-12-31 --allow-post-2010
 
     # 额外尝试拉取指数成分权重（需要 Tushare index_weight 权限）
     python scripts/ingest_market_data.py --with-index-weight
@@ -26,6 +37,8 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import uuid
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Final
@@ -34,9 +47,17 @@ import init_market_db as market
 import polars as pl
 
 from data_pipeline.core.errors import FetchError
+from data_pipeline.guards import enforce_research_2010_gate, require_market_db_path
 from data_pipeline.sources.tushare_src import TushareSource
 
 LOG = logging.getLogger("ingest_market_data")
+
+#: 当前 2010 研究库的默认摄入区间（含端点）。
+DEFAULT_START: Final[str] = "2010-01-01"
+DEFAULT_END: Final[str] = "2010-12-31"
+#: 批次汇总日志写在 ``meta_ingest_log`` 的伪表名。
+BATCH_TABLE: Final[str] = "ingest_batch"
+
 
 DEFAULT_STOCKS: Final[tuple[str, ...]] = (
     "600519.SH",
@@ -64,6 +85,36 @@ DEFAULT_INDEXES: Final[tuple[str, ...]] = ("000300.SH", "000905.SH", "000852.SH"
 #: 默认只取 3 只宽基 ETF；没有 fund_daily 权限时会逐只 warning 并跳过。
 DEFAULT_FUNDS: Final[tuple[str, ...]] = ("510300.SH", "510500.SH", "159915.SZ")
 CORE_STOCKS: Final[tuple[str, ...]] = DEFAULT_STOCKS[:5]
+
+
+# ---------------------------------------------------------------------------
+# 批次
+# ---------------------------------------------------------------------------
+@dataclass
+class IngestBatch:
+    """一次摄入运行的批次上下文；``batch_id`` 会写进每条日志的 detail。"""
+
+    batch_id: str
+    start: str
+    end: str
+    row_count: int = 0
+
+    @classmethod
+    def new(cls, *, start: str, end: str) -> IngestBatch:
+        return cls(batch_id=uuid.uuid4().hex, start=start, end=end)
+
+    @property
+    def scope(self) -> str:
+        return f"{self.start}:{self.end}"
+
+    def detail(self, detail: str | None = None) -> str:
+        prefix = f"batch_id={self.batch_id}"
+        return f"{prefix}; {detail}" if detail else prefix
+
+
+def batch_of(args) -> IngestBatch | None:
+    """从 argparse/SimpleNamespace 取批次上下文；直接调内部函数时可为 None。"""
+    return getattr(args, "batch", None)
 
 
 # ---------------------------------------------------------------------------
@@ -105,7 +156,10 @@ def upsert(con, table: str, frame: pl.DataFrame, keys: tuple[str, ...]) -> int:
             f"ON CONFLICT ({key_sql}) {conflict}"
         )
     finally:
-        con.unregister(view_name)
+        try:
+            con.unregister(view_name)
+        except Exception as exc:  # noqa: BLE001 - 事务已 aborted 时不能掩盖原始写入异常
+            LOG.debug("unregister %s 失败（事务可能已回滚）：%s", view_name, exc)
     return frame.height
 
 
@@ -117,7 +171,17 @@ def log_ingest(
     status: str,
     started: datetime,
     detail: str | None = None,
+    *,
+    batch: IngestBatch | None = None,
 ) -> None:
+    """写一条 ``meta_ingest_log``；调用方负责事务边界。
+
+    ``batch`` 不为空时 detail 前缀 ``batch_id=<id>``，并累计批次成功行数。
+    """
+    if batch is not None:
+        detail = batch.detail(detail)
+        if status == "ok":
+            batch.row_count += rows
     frame = pl.DataFrame(
         {
             "table_name": [table],
@@ -130,6 +194,28 @@ def log_ingest(
         }
     )
     upsert(con, "meta_ingest_log", frame, ("table_name", "scope_key"))
+
+
+def log_batch(
+    con,
+    batch: IngestBatch,
+    *,
+    status: str,
+    started: datetime,
+    rows: int = 0,
+    detail: str | None = None,
+) -> None:
+    """写批次汇总行（伪表 ``ingest_batch``），与数据同事务。"""
+    log_ingest(
+        con,
+        BATCH_TABLE,
+        batch.scope,
+        rows,
+        status,
+        started,
+        batch.detail(detail),
+        batch=None,  # 汇总行不再参与行数累计
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +237,7 @@ def ingest_calendar(con, source: TushareSource, args) -> bool:
             "failed",
             started,
             str(exc)[:500],
+            batch=batch_of(args),
         )
         LOG.warning("交易日历接口不可用，稍后从日线推导：%s", exc)
         return False
@@ -162,6 +249,7 @@ def ingest_calendar(con, source: TushareSource, args) -> bool:
         rows,
         "ok",
         started,
+        batch=batch_of(args),
     )
     LOG.info("交易日历：%d 行", rows)
     return True
@@ -199,23 +287,49 @@ def derive_calendar(con, args) -> None:
         "ok",
         started,
         "derived from fact_daily",
+        batch=batch_of(args),
     )
     LOG.info("交易日历（由日线推导）：%d 行", rows)
 
 
-def ingest_stock_basic(con, source: TushareSource) -> None:
+def ingest_stock_basic(con, source: TushareSource, args) -> None:
+    """摄入股票列表。
+
+    只取 ``list_status='L'``：退市股不在 ``dim_stock_basic``，历史股票池存在
+    幸存者偏差；默认样本股也是当前大票，不是 2010 PIT 股票池。需要历史池时
+    另行补退市/成分数据，不要用当前名单回填历史。
+    """
     started = datetime.now(UTC)
     try:
         frame = source.fetch_stock_basic()
     except FetchError as exc:
         log_ingest(
-            con, "dim_stock_basic", "all:listed", 0, "failed", started, str(exc)[:500]
+            con,
+            "dim_stock_basic",
+            "all:listed",
+            0,
+            "failed",
+            started,
+            str(exc)[:500],
+            batch=batch_of(args),
         )
         LOG.warning("股票列表接口不可用，跳过（不影响日线）：%s", exc)
         return
     rows = upsert(con, "dim_stock_basic", frame, ("ts_code",))
-    log_ingest(con, "dim_stock_basic", "all:listed", rows, "ok", started)
+    log_ingest(
+        con,
+        "dim_stock_basic",
+        "all:listed",
+        rows,
+        "ok",
+        started,
+        batch=batch_of(args),
+    )
     LOG.info("股票列表：%d 行", rows)
+    LOG.warning(
+        "dim_stock_basic 只含 list_status='L'；退市股/历史成分未覆盖，"
+        "历史股票池需另行 PIT 处理"
+    )
 
 
 def _ingest_stock(con, source: TushareSource, ts_code: str, args) -> None:
@@ -233,10 +347,19 @@ def _ingest_stock(con, source: TushareSource, ts_code: str, args) -> None:
             frame = fetch()
             rows = upsert(con, table, frame, keys)
         except FetchError as exc:
-            log_ingest(con, table, scope, 0, "failed", started, str(exc)[:500])
+            log_ingest(
+                con,
+                table,
+                scope,
+                0,
+                "failed",
+                started,
+                str(exc)[:500],
+                batch=batch_of(args),
+            )
             LOG.warning("%s %s 跳过：%s", ts_code, table, exc)
             return None
-        log_ingest(con, table, scope, rows, "ok", started)
+        log_ingest(con, table, scope, rows, "ok", started, batch=batch_of(args))
         if rows == 0:
             LOG.warning("%s %s 返回 0 行", ts_code, table)
         else:
@@ -293,6 +416,7 @@ def ingest_indexes(con, source: TushareSource, args) -> None:
                 rows,
                 "ok",
                 started,
+                batch=batch_of(args),
             )
             LOG.info("指数 %s：%d 行", index_code, rows)
         except FetchError as exc:
@@ -304,6 +428,7 @@ def ingest_indexes(con, source: TushareSource, args) -> None:
                 "failed",
                 started,
                 str(exc)[:500],
+                batch=batch_of(args),
             )
             LOG.warning("指数 %s 跳过：%s", index_code, exc)
 
@@ -323,6 +448,7 @@ def ingest_funds(con, source: TushareSource, args) -> None:
                 rows,
                 "ok",
                 started,
+                batch=batch_of(args),
             )
             LOG.info("ETF %s：%d 行", ts_code, rows)
         except FetchError as exc:
@@ -334,6 +460,7 @@ def ingest_funds(con, source: TushareSource, args) -> None:
                 "failed",
                 started,
                 str(exc)[:500],
+                batch=batch_of(args),
             )
             LOG.warning("ETF %s 跳过（通常是无 fund_daily 权限）：%s", ts_code, exc)
 
@@ -367,6 +494,7 @@ def ingest_index_weights(con, source: TushareSource, args) -> None:
                     "failed",
                     started,
                     str(exc)[:500],
+                    batch=batch_of(args),
                 )
                 LOG.warning(
                     "指数权重 %s@%s 跳过（通常是无 index_weight 权限）：%s",
@@ -393,6 +521,7 @@ def ingest_index_weights(con, source: TushareSource, args) -> None:
                 rows,
                 "ok",
                 started,
+                batch=batch_of(args),
             )
             LOG.info("指数权重 %s@%s：%d 行", index_code, compact, rows)
 
@@ -405,9 +534,23 @@ def build_parser() -> argparse.ArgumentParser:
         prog="ingest_market_data.py",
         description="Tushare -> market.duckdb 增量/回补（幂等）",
     )
-    parser.add_argument("--db", type=Path, default=market.DEFAULT_DB_PATH)
-    parser.add_argument("--start", default="2015-01-01", help="YYYY-MM-DD")
-    parser.add_argument("--end", default=date.today().isoformat(), help="YYYY-MM-DD")
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=None,
+        help="market.duckdb 路径；缺省读 MARKET_DB_PATH，未配置则报错（无相对路径回退）",
+    )
+    parser.add_argument("--start", default=DEFAULT_START, help="YYYY-MM-DD")
+    parser.add_argument(
+        "--end",
+        default=DEFAULT_END,
+        help="YYYY-MM-DD；默认 2010-12-31，写 2011+ 需新库并显式 --allow-post-2010",
+    )
+    parser.add_argument(
+        "--allow-post-2010",
+        action="store_true",
+        help="仅新库/新版本：允许 end>2010-12-31；不作用于 MARKET_DB_PATH 研究库",
+    )
     parser.add_argument("--calendar", default="SSE")
     parser.add_argument(
         "--stocks",
@@ -459,12 +602,86 @@ def _setup_logging(level: str) -> None:
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
 
 
+def _error_text(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {exc}"[:500]
+
+
+def _rollback_quiet(con) -> None:
+    try:
+        con.execute("ROLLBACK")
+    except Exception as exc:  # noqa: BLE001 - 可能已自动回滚或连接已失效
+        LOG.debug("回滚时无活动事务或回滚失败：%s", exc)
+
+
+def _record_failed_batch(
+    con,
+    batch: IngestBatch,
+    started: datetime,
+    exc: BaseException,
+) -> None:
+    """回滚后单独提交一条 failed 批次日志，保证“中断/报错有记录”。"""
+    try:
+        con.execute("BEGIN TRANSACTION")
+        log_batch(
+            con,
+            batch,
+            status="failed",
+            started=started,
+            rows=0,
+            detail=_error_text(exc),
+        )
+        con.execute("COMMIT")
+    except Exception as log_exc:  # noqa: BLE001 - 不能掩盖原始异常
+        _rollback_quiet(con)
+        LOG.error("写 failed 批次日志失败：%s", log_exc)
+
+
+def run_ingest(con, source, args) -> IngestBatch:
+    """执行一次完整摄入：整批一个事务，数据与 ``meta_ingest_log`` 同提交。
+
+    * 单表 ``FetchError`` 属于预期降级：事务内记 failed 后继续；
+    * 其他异常（含 ``duckdb.Error``、``KeyboardInterrupt``）：整批回滚，
+      再单独写一条 failed 批次日志，然后原样抛出；
+    * 不会留下“部分表已写、无记录”的状态。
+    """
+    batch: IngestBatch | None = getattr(args, "batch", None)
+    if batch is None:
+        batch = IngestBatch.new(start=args.start, end=args.end)
+        args.batch = batch
+    started = datetime.now(UTC)
+
+    con.execute("BEGIN TRANSACTION")
+    try:
+        calendar_ok = ingest_calendar(con, source, args)
+        ingest_stock_basic(con, source, args)
+        for ts_code in args.stocks:
+            _ingest_stock(con, source, ts_code, args)
+        if not calendar_ok:
+            derive_calendar(con, args)
+        ingest_indexes(con, source, args)
+        if args.funds:
+            ingest_funds(con, source, args)
+        if args.with_index_weight:
+            ingest_index_weights(con, source, args)
+        log_batch(con, batch, status="ok", started=started, rows=batch.row_count)
+        con.execute("COMMIT")
+        return batch
+    except BaseException as exc:
+        _rollback_quiet(con)
+        _record_failed_batch(con, batch, started, exc)
+        raise
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _setup_logging(args.log_level)
 
-    args.start_compact = date.fromisoformat(args.start).strftime("%Y%m%d")
-    args.end_compact = date.fromisoformat(args.end).strftime("%Y%m%d")
+    try:
+        args.start_compact = date.fromisoformat(args.start).strftime("%Y%m%d")
+        args.end_compact = date.fromisoformat(args.end).strftime("%Y%m%d")
+    except ValueError as exc:
+        LOG.error("日期参数非法（要求 YYYY-MM-DD）：%s", exc)
+        return 2
     args.stocks = tuple(code.strip() for code in args.stocks.split(",") if code.strip())
     args.indexes = tuple(
         code.strip() for code in args.indexes.split(",") if code.strip()
@@ -472,23 +689,27 @@ def main(argv: list[str] | None = None) -> int:
     args.funds = tuple(code.strip() for code in args.funds.split(",") if code.strip())
 
     try:
+        db_path = require_market_db_path(args.db)
+        # fail-fast：先过写入闸门，再建连接/构造 Tushare 客户端。
+        enforce_research_2010_gate(
+            db_path,
+            args.end,
+            allow_post_2010=args.allow_post_2010,
+        )
+        batch = IngestBatch.new(start=args.start, end=args.end)
+        args.batch = batch
         source = TushareSource()
         with market.database(
-            args.db, threads=args.threads, memory_limit=args.memory_limit
+            db_path, threads=args.threads, memory_limit=args.memory_limit
         ) as con:
             market.init_schema(con)
-            calendar_ok = ingest_calendar(con, source, args)
-            ingest_stock_basic(con, source)
-            for ts_code in args.stocks:
-                _ingest_stock(con, source, ts_code, args)
-            if not calendar_ok:
-                derive_calendar(con, args)
-            ingest_indexes(con, source, args)
-            if args.funds:
-                ingest_funds(con, source, args)
-            if args.with_index_weight:
-                ingest_index_weights(con, source, args)
-            LOG.info("完成：db=%s version=%s", args.db, market.installed_version(con))
+            run_ingest(con, source, args)
+            LOG.info(
+                "完成：db=%s version=%s batch_id=%s",
+                db_path,
+                market.installed_version(con),
+                batch.batch_id,
+            )
     except market.ConfigError as exc:
         LOG.error("配置错误：%s", exc)
         return 2

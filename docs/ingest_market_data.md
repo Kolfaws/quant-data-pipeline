@@ -26,20 +26,30 @@ Tushare pro_api
 
 ## 2. 命令
 
+脚本默认区间是 `2010-01-01..2010-12-31`（当前研究库只保留 2010）。
+目标为 `MARKET_DB_PATH` 且 `end > 2010-12-31` 时脚本 fail-fast（退出码 2，不建库/不写库）；
+写 2011+ 只允许新库/新版本，并显式加 `--allow-post-2010`。
+`--db` 缺省时读 `MARKET_DB_PATH`；两者都没有则报错，不再回退相对路径默认库。
+
 ```bash
 python scripts/ingest_market_data.py \
     --db "${MARKET_DB_PATH}" \
-    --start 2015-01-01 --end 2026-11-06 \
+    --start 2010-01-01 --end 2010-12-31 \
     --stocks 600519.SH,000858.SZ,... \
     --indexes 000300.SH,000905.SH,000852.SH \
     --daily-basic core \
     --with-index-weight
+
+# 新库/新版本写 2011+
+python scripts/ingest_market_data.py --db "$MARKET_TEST_DB_PATH" \
+    --start 2011-01-01 --end 2011-12-31 --allow-post-2010
 ```
 
 | 参数 | 默认 | 说明 |
 | --- | --- | --- |
-| `--db` | `DUCKDB_PATH` | market.duckdb 路径 |
-| `--start` / `--end` | `2015-01-01` / 今天 | `YYYY-MM-DD` |
+| `--db` | `MARKET_DB_PATH` | market.duckdb 路径；env 未配置则报错（无相对路径回退） |
+| `--start` / `--end` | `2010-01-01` / `2010-12-31` | `YYYY-MM-DD`；越界受 2010 写入闸门约束 |
+| `--allow-post-2010` | 关 | 仅新库/新版本允许 `end>2010-12-31`；不作用于 `MARKET_DB_PATH` |
 | `--calendar` | `SSE` | 交易日历交易所 |
 | `--stocks` | 20 只样本股 | 逗号分隔；传空跳过个股 |
 | `--indexes` | `000300.SH,000905.SH,000852.SH` | 逗号分隔；传空跳过指数 |
@@ -49,6 +59,10 @@ python scripts/ingest_market_data.py \
 | `--with-index-weight` | 关 | 需要 Tushare 权限 |
 
 ## 3. 幂等与主键
+
+> 股票池注意：`stock_basic` 默认只取 `list_status='L'`，`dim_stock_basic` 不含退市股；
+> 默认 20 只样本股是当前大票，不是 2010 PIT 股票池。历史研究股票池需另行补退市/
+> 成分数据，不能用当前名单回填历史。
 
 | 表 | 幂等键 |
 | --- | --- |
@@ -64,6 +78,14 @@ python scripts/ingest_market_data.py \
 
 写入使用 `INSERT INTO ... BY NAME SELECT * FROM <registered frame> ON CONFLICT
 (keys) DO UPDATE`，同一标的重复拉取只覆盖，不追加。
+
+**事务语义**：整个摄入（所有表 + `meta_ingest_log`）包在一个事务里。
+
+- 正常结束：数据与日志一起 `COMMIT`；
+- 单表 `FetchError`（限频/无权限）：事务内记一条 failed 日志后继续，属于预期降级；
+- `duckdb.Error`、`KeyboardInterrupt` 等：整批 `ROLLBACK`，然后单独写一条
+  `ingest_batch` failed 日志（含 `batch_id` 与错误摘要），不会留下
+  “部分表已写、无记录”的状态。
 
 ## 4. 限频与权限降级
 
@@ -85,7 +107,7 @@ Tushare 不同积分档位的接口频率差异很大。脚本按以下策略降
 可交易标记不在 ingest 中派生，需在行情和涨跌停就绪后单独执行：
 
 ```bash
-python scripts/build_tradable_flags.py --start 2015-01-01 --end 2026-11-05 --apply
+python scripts/build_tradable_flags.py --start 2010-01-01 --end 2010-12-31 --apply
 ```
 
 ## 5. 5000 积分 token 的推荐顺序
@@ -106,7 +128,8 @@ python scripts/build_tradable_flags.py --start 2015-01-01 --end 2026-11-05 --app
 ## 6. 调度建议
 
 - 交易日收盘后（18:00 之后）执行一次；重复执行安全。
-- 增量区间可用 `--start <最近N天> --end 今天`，靠 upsert 覆盖修订。
+- 当前 2010 研究库的增量区间仍须落在 2010 内；`--start 2010-12-01 --end 2010-12-31`
+  靠 upsert 覆盖修订。写 2011+ 必须换新库并加 `--allow-post-2010`。
 - 大规模全市场回补建议按年份分段，避免单次请求/内存过大。
 
 ## 7. 元数据
@@ -115,14 +138,17 @@ python scripts/build_tradable_flags.py --start 2015-01-01 --end 2026-11-05 --app
 
 | 字段 | 说明 |
 | --- | --- |
-| `table_name` | 目标表 |
-| `scope_key` | 范围键，如 `600519.SH:2015-01-01:2026-11-06` |
-| `row_count` | 写入行数 |
+| `table_name` | 目标表；批次汇总行的伪表名为 `ingest_batch` |
+| `scope_key` | 范围键，如 `600519.SH:2010-01-01:2010-12-31`；汇总行为 `start:end` |
+| `row_count` | 写入行数（汇总行为本批成功行数合计） |
 | `status` | `ok` / `failed` |
-| `detail` | 本批各表行数或错误摘要 |
+| `detail` | `batch_id=<uuid>` 前缀 + 本表错误摘要；汇总行另含错误类型/信息 |
 | `started_at` / `finished_at` | 起止时间 |
 
-同一 `(table_name, scope_key)` 重复执行会覆盖日志，不膨胀。
+`batch_id` 是每次运行生成的 UUID（同一批所有表共用），用于把失败回滚后的
+`ingest_batch` 记录与日志检索关联起来（schema 无独立列，存在 `detail` 里）。
+同一 `(table_name, scope_key)` 重复执行会覆盖日志，不膨胀；回滚场景下只会留下
+一条 `ingest_batch` failed 记录，其余表日志随事务回滚。
 
 ## 8. 常见问题
 

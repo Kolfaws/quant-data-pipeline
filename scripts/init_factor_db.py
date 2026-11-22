@@ -10,9 +10,13 @@ Constraints:
     同一 DuckDB 文件跨进程只允许一个 RW 连接，初始化与批次写入均需串行。
 
 用法：
-    python init_factor_db.py init    --db "$DUCKDB_PATH"
-    python init_factor_db.py check   --db "$DUCKDB_PATH"
-    python init_factor_db.py refresh --db "$DUCKDB_PATH"   # 因子目录变更后重建宽表视图
+    python init_factor_db.py init    --db "${MARKET_DB_PATH}"
+    python init_factor_db.py check   --db "${MARKET_DB_PATH}"
+    python init_factor_db.py refresh --db "${MARKET_DB_PATH}"   # 因子目录变更后重建宽表视图
+
+    库路径必须显式：传 --db，或由环境变量提供。
+    --env test 只读 MARKET_TEST_DB_PATH；未配置时立即失败（退出码 2），
+    不会回退正式库。
 
 复杂度：
     init_schema   O(T + F + C)
@@ -41,7 +45,7 @@ from quant_schema.market_ddl import (
     FACTOR_TABLES,
 )
 
-from data_pipeline.config import market_db_path
+from data_pipeline.guards import require_market_db_path
 
 LOG = logging.getLogger("init_factor_db")
 
@@ -57,7 +61,6 @@ database = _market.database
 _scalar = _market._scalar
 _normalise_type = normalise_type
 
-DEFAULT_DB_PATH: Final[Path] = _market.DEFAULT_DB_PATH
 DEFAULT_THREADS: Final[int] = _market.DEFAULT_THREADS
 DEFAULT_MEMORY_LIMIT: Final[str] = _market.DEFAULT_MEMORY_LIMIT
 DEFAULT_LOG_LEVEL: Final[str] = _market.DEFAULT_LOG_LEVEL
@@ -426,14 +429,15 @@ _ACTION_LABEL: Final[dict[str, str]] = {
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     _setup_logging(args.log_level)
-    db_path = args.db or Path(market_db_path(args.env) or DEFAULT_DB_PATH)
 
     try:
+        db_path = require_market_db_path(args.db, env=args.env)
         with database(
             db_path,
             threads=args.threads,
             memory_limit=args.memory_limit,
             temp_dir=args.temp_dir,
+            read_only=args.command == "check",
         ) as con:
             if args.command == "check":
                 verify_schema(con)
